@@ -215,23 +215,6 @@ Aucun terminal n'est nécessaire.
 
 À chaque nouveau commit fait depuis GitHub, Vercel redéploiera automatiquement l'application.
 
----
-
-## Variables d'environnement
-
-Dans **Vercel > Project > Settings > Environment Variables**, ajoutez :
-
-| Variable | Valeur |
-|---|---|
-| `NEXT_PUBLIC_SUPABASE_URL` | URL du projet Supabase |
-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Publishable key Supabase (`sb_publishable_...`) |
-| `SUPABASE_SECRET_KEY` | Secret key Supabase (`sb_secret_...`), serveur uniquement |
-| `ACCOUNT_CREATION_SECRET` | `EUROVISION` |
-
-Le fichier `.env.example` rappelle ces quatre variables, mais il ne contient aucune vraie clé.
-
----
-
 ## Structure du projet
 
 ```text
