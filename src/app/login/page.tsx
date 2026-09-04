@@ -75,7 +75,7 @@ export default function LoginPage() {
             ) : null}
             <label className="block">
               <span className="form-label">Pseudo</span>
-              <input className="form-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="ex. chamdan" autoCapitalize="none" required />
+              <input className="form-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Choisissez un pseudo" autoCapitalize="none" required />
             </label>
             <label className="block">
               <span className="form-label">Mot de passe</span>
