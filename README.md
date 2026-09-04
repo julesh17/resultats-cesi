@@ -4,7 +4,7 @@
 
 # Résultats CESI
 
-Plateforme web de suivi académique pour les sessions CESI : notes, UE, compensations, rattrapages, dettes, préparation des jurys et préconisations.
+Plateforme web de suivi académique pour les sessions CESI : notes, UE, compensations, rattrapages, dettes et préparation des jurys.
 
 L'application est conçue pour être déployée avec **Next.js + Vercel** et utilise **Supabase** pour l'authentification, la base PostgreSQL et le stockage des fichiers Excel.
 
