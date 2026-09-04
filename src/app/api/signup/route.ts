@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { internalEmail, validateUsername } from '@/lib/auth';
+import { publicServerError } from '@/lib/server/errors';
 
 export async function POST(request: NextRequest) {
   try {
@@ -59,7 +60,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Erreur inattendue.' },
+      { error: publicServerError(error, 'Erreur inattendue.') },
       { status: 500 },
     );
   }

@@ -433,7 +433,7 @@ on conflict (id) do nothing;
 -- IMPORTANT : RLS ne suffit pas à lui seul. PostgreSQL exige aussi les privilèges
 -- de table. Sans ces GRANT, le navigateur renvoie par exemple
 -- « permission denied for table sessions » avant même d'évaluer la policy RLS.
-grant usage on schema public to authenticated;
+grant usage on schema public to authenticated, service_role;
 grant select, insert, update, delete on table
   public.profiles,
   public.sessions,
@@ -451,12 +451,37 @@ grant select, insert, update, delete on table
   public.jury_preconisations
 to authenticated;
 
-grant usage, select on all sequences in schema public to authenticated;
+grant all privileges on table
+  public.profiles,
+  public.sessions,
+  public.session_years,
+  public.semesters,
+  public.session_subscriptions,
+  public.students,
+  public.ues,
+  public.evaluations,
+  public.import_history,
+  public.grades,
+  public.debts,
+  public.jury_records,
+  public.preconisations,
+  public.jury_preconisations
+to service_role;
 
--- Les futures tables/séquences créées par le même propriétaire héritent aussi
--- des droits nécessaires aux comptes connectés.
+grant usage, select on all sequences in schema public to authenticated;
+grant all privileges on all sequences in schema public to service_role;
+grant execute on all functions in schema public to authenticated, service_role;
+
+-- Les futurs objets créés par le même propriétaire héritent aussi des droits
+-- nécessaires au navigateur authentifié et aux routes serveur.
 alter default privileges in schema public
   grant select, insert, update, delete on tables to authenticated;
 alter default privileges in schema public
+  grant all privileges on tables to service_role;
+alter default privileges in schema public
   grant usage, select on sequences to authenticated;
+alter default privileges in schema public
+  grant all privileges on sequences to service_role;
+alter default privileges in schema public
+  grant execute on functions to authenticated, service_role;
 

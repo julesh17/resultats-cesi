@@ -126,10 +126,14 @@ where analytic_code is not null;
 -- -----------------------------------------------------------------------------
 -- 3. RLS + privilèges PostgreSQL
 -- -----------------------------------------------------------------------------
--- Une policy RLS ne donne PAS à elle seule le droit SQL d'accéder à une table.
--- On accorde donc explicitement SELECT/INSERT/UPDATE/DELETE à authenticated sur
--- toutes les tables utilisées par le navigateur.
-grant usage on schema public to authenticated;
+-- Deux chemins accèdent aux données :
+--   - le navigateur, avec le rôle authenticated ;
+--   - les routes API Vercel (imports, création de compte, synchronisation),
+--     avec la clé serveur et donc le rôle service_role.
+-- Les deux rôles doivent donc disposer des privilèges SQL de table. Le rôle
+-- service_role contourne RLS, mais il a malgré tout besoin des GRANT PostgreSQL.
+
+grant usage on schema public to authenticated, service_role;
 
 DO $$
 declare
@@ -147,25 +151,41 @@ begin
         'create policy authenticated_all on public.%I for all to authenticated using (true) with check (true)',
         t
       );
+
+      -- Accès direct depuis le navigateur après authentification.
       execute format('grant select, insert, update, delete on table public.%I to authenticated', t);
+
+      -- Accès des routes API serveur utilisant SUPABASE_SECRET_KEY /
+      -- SUPABASE_SERVICE_ROLE_KEY.
+      execute format('grant all privileges on table public.%I to service_role', t);
     end if;
   end loop;
 end $$;
 
 grant usage, select on all sequences in schema public to authenticated;
+grant all privileges on all sequences in schema public to service_role;
+grant execute on all functions in schema public to authenticated, service_role;
 
+-- Les futurs objets créés dans public héritent des mêmes droits.
 alter default privileges in schema public
   grant select, insert, update, delete on tables to authenticated;
 alter default privileges in schema public
+  grant all privileges on tables to service_role;
+alter default privileges in schema public
   grant usage, select on sequences to authenticated;
+alter default privileges in schema public
+  grant all privileges on sequences to service_role;
+alter default privileges in schema public
+  grant execute on functions to authenticated, service_role;
 
--- Contrôle rapide : chaque ligne doit afficher true dans les quatre colonnes.
+-- Contrôle final. Chaque table doit afficher TRUE pour authenticated_select et
+-- service_role_select. service_role_insert doit également être TRUE.
 select
   c.relname as table_name,
-  has_table_privilege('authenticated', c.oid, 'SELECT') as can_select,
-  has_table_privilege('authenticated', c.oid, 'INSERT') as can_insert,
-  has_table_privilege('authenticated', c.oid, 'UPDATE') as can_update,
-  has_table_privilege('authenticated', c.oid, 'DELETE') as can_delete
+  has_table_privilege('authenticated', c.oid, 'SELECT') as authenticated_select,
+  has_table_privilege('authenticated', c.oid, 'INSERT') as authenticated_insert,
+  has_table_privilege('service_role', c.oid, 'SELECT') as service_role_select,
+  has_table_privilege('service_role', c.oid, 'INSERT') as service_role_insert
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where n.nspname = 'public'

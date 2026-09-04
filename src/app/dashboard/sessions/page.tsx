@@ -11,11 +11,12 @@ import { cycleYears, normalizeAnalyticCode } from '@/lib/utils';
 function readableSessionError(message: string) {
   const lower = message.toLowerCase();
   if (lower.includes('sessions_analytic_code') || lower.includes('analytic_code') && lower.includes('duplicate')) {
-    return 'Ce code analytique est déjà utilisé. Les majuscules et minuscules sont considérées comme équivalentes.';
+    return 'Ce code analytique est déjà utilisé.';
   }
   if (lower.includes('sessions_name_key') || lower.includes('duplicate key')) {
     return 'Une session portant ce nom ou ce code analytique existe déjà.';
   }
+  if (lower.includes('permission denied') || lower.includes('row-level security')) return 'Impossible d’accéder aux données pour le moment.';
   return message;
 }
 
@@ -133,7 +134,6 @@ export default function SessionsPage() {
           <label className="block">
             <span className="form-label">Code analytique</span>
             <input className="form-input" placeholder="tl42t201" value={code} onChange={(e) => setCode(e.target.value)} required autoCapitalize="none" />
-            <span className="mt-1 block text-[11px] muted">La casse n’est pas prise en compte : TL42 et tl42 sont équivalents.</span>
           </label>
           <label className="block">
             <span className="form-label">Cycle</span>
@@ -195,7 +195,6 @@ export default function SessionsPage() {
             <label className="block">
               <span className="form-label">Code analytique</span>
               <input name="analytic_code" className="form-input" defaultValue={edit.analytic_code || ''} autoCapitalize="none" placeholder="À renseigner si la session a été créée par import" />
-              <span className="mt-1 block text-[11px] muted">La casse n’est pas prise en compte.</span>
             </label>
             <div className="rounded-xl bg-gray-50 p-3 text-xs muted">Le type de cycle n’est pas modifiable après création, afin de conserver la structure A1…A5 / S1…S10 cohérente.</div>
             <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={() => setEdit(null)}>Annuler</button><button className="btn-primary">Enregistrer</button></div>

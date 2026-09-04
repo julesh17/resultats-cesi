@@ -5,6 +5,7 @@ import { requireApiUser } from '@/lib/server/auth';
 import { syncDebtsForSession } from '@/lib/server/debts';
 import { normalizeAnalyticCode, normalizeText, slugify } from '@/lib/utils';
 import type { CycleType } from '@/lib/types';
+import { publicServerError } from '@/lib/server/errors';
 
 type SessionRow = {
   id: string;
@@ -270,6 +271,6 @@ export async function POST(request: NextRequest) {
       debts_created: debtSync.reduce((sum, item) => sum + item.inserted, 0),
     });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Import impossible.' }, { status: 500 });
+    return NextResponse.json({ error: publicServerError(error, 'Import impossible.') }, { status: 500 });
   }
 }

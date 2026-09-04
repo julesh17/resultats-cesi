@@ -4,6 +4,7 @@ import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { requireApiUser } from '@/lib/server/auth';
 import { syncDebtsForSession } from '@/lib/server/debts';
 import { slugify } from '@/lib/utils';
+import { publicServerError } from '@/lib/server/errors';
 
 type UeDbRow = { id: string; semester: number; name: string };
 type EvalDbRow = {
@@ -137,6 +138,6 @@ export async function POST(request: NextRequest) {
       debts_created: debtSync.inserted,
     });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Import impossible.' }, { status: 500 });
+    return NextResponse.json({ error: publicServerError(error, 'Import impossible.') }, { status: 500 });
   }
 }
