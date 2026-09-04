@@ -31,7 +31,7 @@ export default function DettesPage() {
     if (!sessionId) { setLoading(false); return; }
     setLoading(true);
     const { data: studentRows } = await supabase.from('students').select('id').eq('session_id', sessionId);
-    const ids = (studentRows || []).map((s) => s.id);
+    const ids = ((studentRows || []) as Array<{ id: string }>).map((s) => s.id);
     if (!ids.length) { setDebts([]); setLoading(false); return; }
     let query = supabase.from('debts').select('*,students(id,first_name,last_name,session_id),ues(id,name,semester)').in('student_id', ids).order('created_at', { ascending: false });
     if (status !== 'all') query = query.eq('status', status);
