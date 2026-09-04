@@ -6,7 +6,18 @@ import Loading from '@/components/Loading';
 import Modal from '@/components/Modal';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
 import type { CesiSession, CycleType } from '@/lib/types';
-import { cycleYears } from '@/lib/utils';
+import { cycleYears, normalizeAnalyticCode } from '@/lib/utils';
+
+function readableSessionError(message: string) {
+  const lower = message.toLowerCase();
+  if (lower.includes('sessions_analytic_code') || lower.includes('analytic_code') && lower.includes('duplicate')) {
+    return 'Ce code analytique est déjà utilisé. Les majuscules et minuscules sont considérées comme équivalentes.';
+  }
+  if (lower.includes('sessions_name_key') || lower.includes('duplicate key')) {
+    return 'Une session portant ce nom ou ce code analytique existe déjà.';
+  }
+  return message;
+}
 
 export default function SessionsPage() {
   const [loading, setLoading] = useState(true);
@@ -20,7 +31,6 @@ export default function SessionsPage() {
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
   const [cycle, setCycle] = useState<CycleType>('ingenieur');
-  const [campus, setCampus] = useState('Toulouse');
 
   async function load() {
     const supabase = getSupabaseBrowser();
@@ -29,10 +39,13 @@ export default function SessionsPage() {
     setUserId(uid);
     const [s, sub] = await Promise.all([
       supabase.from('sessions').select('*').order('name'),
-      uid ? supabase.from('session_subscriptions').select('session_id').eq('user_id', uid) : Promise.resolve({ data: [] as Array<{ session_id: string }> }),
+      uid
+        ? supabase.from('session_subscriptions').select('session_id').eq('user_id', uid)
+        : Promise.resolve({ data: [] as Array<{ session_id: string }> }),
     ]);
     setSessions((s.data || []) as CesiSession[]);
-    setSubscriptions(new Set((sub.data || []).map((x) => x.session_id)));
+    setSubscriptions(new Set(((sub.data || []) as Array<{ session_id: string }>).map((x) => x.session_id)));
+    if (s.error) setError(readableSessionError(s.error.message));
     setLoading(false);
   }
 
@@ -45,15 +58,23 @@ export default function SessionsPage() {
     const supabase = getSupabaseBrowser();
     const { data, error: insertError } = await supabase.from('sessions').insert({
       name: name.trim(),
-      analytic_code: code.trim().toLowerCase(),
+      analytic_code: normalizeAnalyticCode(code),
       cycle,
-      campus: campus.trim() || null,
       created_by: userId || null,
     }).select('*').single();
-    if (insertError) setError(insertError.message);
-    else {
-      if (userId) await supabase.from('session_subscriptions').upsert({ user_id: userId, session_id: data.id });
-      setName(''); setCode(''); setCampus('Toulouse'); setCycle('ingenieur');
+
+    if (insertError) {
+      setError(readableSessionError(insertError.message));
+    } else {
+      if (userId && data?.id) {
+        const { error: followError } = await supabase
+          .from('session_subscriptions')
+          .upsert({ user_id: userId, session_id: data.id });
+        if (followError) setError(readableSessionError(followError.message));
+      }
+      setName('');
+      setCode('');
+      setCycle('ingenieur');
       await load();
     }
     setSaving(false);
@@ -61,33 +82,36 @@ export default function SessionsPage() {
 
   async function toggleFollow(sessionId: string) {
     if (!userId) return;
+    setError('');
     const supabase = getSupabaseBrowser();
-    if (subscriptions.has(sessionId)) {
-      await supabase.from('session_subscriptions').delete().eq('user_id', userId).eq('session_id', sessionId);
-    } else {
-      await supabase.from('session_subscriptions').upsert({ user_id: userId, session_id: sessionId });
-    }
+    const result = subscriptions.has(sessionId)
+      ? await supabase.from('session_subscriptions').delete().eq('user_id', userId).eq('session_id', sessionId)
+      : await supabase.from('session_subscriptions').upsert({ user_id: userId, session_id: sessionId });
+    if (result.error) setError(readableSessionError(result.error.message));
     await load();
   }
 
   async function saveEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!edit) return;
+    setError('');
     const form = new FormData(event.currentTarget);
+    const codeValue = normalizeAnalyticCode(String(form.get('analytic_code') || ''));
     const supabase = getSupabaseBrowser();
     const { error: updateError } = await supabase.from('sessions').update({
       name: String(form.get('name') || '').trim(),
-      analytic_code: String(form.get('analytic_code') || '').trim().toLowerCase(),
-      campus: String(form.get('campus') || '').trim() || null,
+      analytic_code: codeValue || null,
     }).eq('id', edit.id);
-    if (updateError) setError(updateError.message);
+    if (updateError) setError(readableSessionError(updateError.message));
     else { setEdit(null); await load(); }
   }
 
   async function remove(session: CesiSession) {
     if (!window.confirm(`Supprimer définitivement la session « ${session.name} » et toutes ses données ?`)) return;
+    setError('');
     const { error: deleteError } = await getSupabaseBrowser().from('sessions').delete().eq('id', session.id);
-    if (deleteError) setError(deleteError.message); else await load();
+    if (deleteError) setError(readableSessionError(deleteError.message));
+    else await load();
   }
 
   if (loading) return <Loading />;
@@ -101,27 +125,24 @@ export default function SessionsPage() {
 
       <section className="card p-5 md:p-6">
         <div className="flex items-center gap-2 mb-5"><Plus size={18} className="text-blue-600" /><h2 className="section-title">Créer une session</h2></div>
-        <form onSubmit={createSession} className="grid md:grid-cols-2 xl:grid-cols-5 gap-4 items-end">
+        <form onSubmit={createSession} className="grid md:grid-cols-2 xl:grid-cols-4 gap-4 items-end">
           <label className="block xl:col-span-2">
             <span className="form-label">Nom de la session</span>
-            <input className="form-input" placeholder="FISA S3E 24-27 Toulouse" value={name} onChange={(e) => setName(e.target.value)} required />
+            <input className="form-input" placeholder="FISA S3E 24-27" value={name} onChange={(e) => setName(e.target.value)} required />
           </label>
           <label className="block">
             <span className="form-label">Code analytique</span>
-            <input className="form-input" placeholder="tl42t201" value={code} onChange={(e) => setCode(e.target.value)} required />
+            <input className="form-input" placeholder="tl42t201" value={code} onChange={(e) => setCode(e.target.value)} required autoCapitalize="none" />
+            <span className="mt-1 block text-[11px] muted">La casse n’est pas prise en compte : TL42 et tl42 sont équivalents.</span>
           </label>
           <label className="block">
             <span className="form-label">Cycle</span>
-            <select className="form-input" value={cycle} onChange={(e) => setCycle(e.target.value as CycleType)}>
+            <select className="form-select" value={cycle} onChange={(e) => setCycle(e.target.value as CycleType)}>
               <option value="ingenieur">Cycle ingénieur · A3/A4/A5</option>
               <option value="cpi">CPI · A1/A2</option>
             </select>
           </label>
-          <label className="block">
-            <span className="form-label">Campus</span>
-            <input className="form-input" value={campus} onChange={(e) => setCampus(e.target.value)} />
-          </label>
-          <div className="xl:col-span-5 flex justify-end">
+          <div className="xl:col-span-4 flex justify-end">
             <button className="btn-primary" disabled={saving}><Plus size={16} /> {saving ? 'Création…' : 'Créer la session'}</button>
           </div>
         </form>
@@ -139,7 +160,9 @@ export default function SessionsPage() {
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <h3 className="font-semibold leading-snug">{session.name}</h3>
-                  <p className="text-sm muted mt-1">{session.analytic_code}{session.campus ? ` · ${session.campus}` : ''}</p>
+                  <p className={`text-sm mt-1 ${session.analytic_code ? 'muted' : 'text-amber-700'}`}>
+                    {session.analytic_code || 'Code analytique à renseigner'}
+                  </p>
                 </div>
                 <button className={subscriptions.has(session.id) ? 'btn-primary !p-2' : 'btn-secondary !p-2'} title={subscriptions.has(session.id) ? 'Se désabonner' : 'Suivre cette session'} onClick={() => toggleFollow(session.id)}>
                   {subscriptions.has(session.id) ? <Bell size={16} /> : <BellOff size={16} />}
@@ -161,7 +184,7 @@ export default function SessionsPage() {
               </div>
             </article>
           ))}
-          {!sessions.length ? <div className="card p-8 text-sm muted md:col-span-2 xl:col-span-3 text-center">Aucune session pour le moment.</div> : null}
+          {!sessions.length ? <div className="card p-8 text-sm muted md:col-span-2 xl:col-span-3 text-center">Aucune session pour le moment. Vous pouvez aussi importer directement un fichier de notes : les sessions inconnues seront créées automatiquement.</div> : null}
         </div>
       </section>
 
@@ -169,8 +192,11 @@ export default function SessionsPage() {
         {edit ? (
           <form className="space-y-4" onSubmit={saveEdit}>
             <label className="block"><span className="form-label">Nom</span><input name="name" className="form-input" defaultValue={edit.name} required /></label>
-            <label className="block"><span className="form-label">Code analytique</span><input name="analytic_code" className="form-input" defaultValue={edit.analytic_code} required /></label>
-            <label className="block"><span className="form-label">Campus</span><input name="campus" className="form-input" defaultValue={edit.campus || ''} /></label>
+            <label className="block">
+              <span className="form-label">Code analytique</span>
+              <input name="analytic_code" className="form-input" defaultValue={edit.analytic_code || ''} autoCapitalize="none" placeholder="À renseigner si la session a été créée par import" />
+              <span className="mt-1 block text-[11px] muted">La casse n’est pas prise en compte.</span>
+            </label>
             <div className="rounded-xl bg-gray-50 p-3 text-xs muted">Le type de cycle n’est pas modifiable après création, afin de conserver la structure A1…A5 / S1…S10 cohérente.</div>
             <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={() => setEdit(null)}>Annuler</button><button className="btn-primary">Enregistrer</button></div>
           </form>

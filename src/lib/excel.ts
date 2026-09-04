@@ -4,6 +4,7 @@ import { parseMention } from './results';
 
 export type NotesImportRow = {
   sessionName: string;
+  sessionAnalyticCode: string | null;
   personRaw: string;
   firstName: string;
   lastName: string;
@@ -56,19 +57,20 @@ function normalizedPersonKey(person: string) {
   return normalizeText(person).replace(/\s+/g, '-');
 }
 
-function firstExisting(row: Record<string, unknown>, names: string[]) {
-  for (const name of names) {
-    if (Object.prototype.hasOwnProperty.call(row, name)) return row[name];
-  }
-  return null;
-}
-
 export function parseNotesWorkbook(buffer: ArrayBuffer): NotesImportRow[] {
   const rows = readFirstSheet(buffer);
   if (!rows.length) throw new Error('Le fichier de notes est vide.');
   const columns = Object.keys(rows[0]);
   if (!columns.includes('Session')) throw new Error("Colonne 'Session' introuvable.");
   if (!columns.includes('Personne')) throw new Error("Colonne 'Personne' introuvable.");
+
+  const analyticCodeAliases = [
+    'Code analytique',
+    'Code analytique session',
+    'Code analytique de la session',
+    'Code session',
+  ].map(normalizeText);
+  const analyticCodeColumn = columns.find((c) => analyticCodeAliases.includes(normalizeText(c)));
 
   const evalColumns = columns.filter((c) => /^Eval\s*-/i.test(c));
   if (!evalColumns.length) throw new Error("Aucune colonne 'Eval - ...' trouvée.");
@@ -77,6 +79,9 @@ export function parseNotesWorkbook(buffer: ArrayBuffer): NotesImportRow[] {
     .filter((row) => String(row.Session || '').trim() && String(row.Personne || '').trim())
     .map((row) => {
       const sessionName = String(row.Session).trim();
+      const sessionAnalyticCode = analyticCodeColumn && row[analyticCodeColumn] !== null && row[analyticCodeColumn] !== undefined
+        ? String(row[analyticCodeColumn]).trim().toLowerCase() || null
+        : null;
       const personRaw = String(row.Personne).trim();
       const { firstName, lastName } = splitPerson(personRaw);
       const grades = evalColumns.map((evalColumn) => {
@@ -119,6 +124,7 @@ export function parseNotesWorkbook(buffer: ArrayBuffer): NotesImportRow[] {
 
       return {
         sessionName,
+        sessionAnalyticCode,
         personRaw,
         firstName,
         lastName,

@@ -52,8 +52,7 @@ export default function ImportsPage() {
     });
     const json = await response.json();
     if (!response.ok) {
-      const suffix = json.unknown_sessions?.length ? ` Sessions inconnues : ${json.unknown_sessions.join(', ')}.` : '';
-      throw new Error((json.error || 'Import impossible.') + suffix);
+      throw new Error(json.error || 'Import impossible.');
     }
     return json;
   }
@@ -66,7 +65,9 @@ export default function ImportsPage() {
       const form = new FormData();
       form.append('file', notesFile);
       const json = await apiUpload('/api/import/notes', form);
-      setNotesResult(`Import terminé : ${json.sessions} session(s), ${json.students} étudiant(s), ${json.grades} cellule(s) de note. ${json.debts_created || 0} nouvelle(s) dette(s) détectée(s).`);
+      const created = json.sessions_created ? ` · ${json.sessions_created} session(s) créée(s) automatiquement` : '';
+      const missingCode = json.sessions_without_analytic_code ? ` · ${json.sessions_without_analytic_code} code(s) analytique(s) à renseigner` : '';
+      setNotesResult(`Import terminé : ${json.sessions} session(s), ${json.students} étudiant(s), ${json.grades} cellule(s) de note${created}${missingCode}. ${json.debts_created || 0} nouvelle(s) dette(s) détectée(s).`);
       await load();
     } catch (e) {
       setNotesResult(`Erreur : ${e instanceof Error ? e.message : 'Import impossible.'}`);
@@ -101,14 +102,14 @@ export default function ImportsPage() {
       <div className="grid xl:grid-cols-2 gap-5">
         <section className="card p-5 md:p-6">
           <div className="flex items-center gap-2 mb-2"><FileSpreadsheet className="text-blue-600" size={20} /><h2 className="section-title">Notes — import général</h2></div>
-          <p className="text-sm muted mb-5">Un seul fichier peut contenir plusieurs sessions grâce à la colonne <strong>Session</strong>. Les sessions doivent déjà exister avec exactement le même nom.</p>
+          <p className="text-sm muted mb-5">Un seul fichier peut contenir plusieurs sessions grâce à la colonne <strong>Session</strong>. Si une session n’existe pas encore, elle est créée automatiquement.</p>
           <form onSubmit={importNotes} className="space-y-4">
             <label className="block">
               <span className="form-label">Fichier de notes .xlsx</span>
               <input className="form-input file:mr-3 file:border-0 file:bg-transparent file:font-medium" type="file" accept=".xlsx" onChange={(e) => setNotesFile(e.target.files?.[0] || null)} required />
             </label>
             <div className="rounded-xl bg-blue-50 border border-blue-100 p-3 text-xs text-blue-800">
-              Une réimportation met à jour les mêmes étudiants, évaluations et notes. Les cellules vides du fichier redeviennent des notes non saisies. Les valeurs manuelles peuvent ensuite être modifiées dans <strong>Notes & UE</strong>.
+              Une réimportation met à jour les mêmes étudiants, évaluations et notes. Si le fichier contient une colonne <strong>Code analytique</strong>, elle est utilisée lors de la création automatique ; sinon le code pourra être renseigné ensuite dans <strong>Sessions</strong>. Les cellules vides redeviennent des notes non saisies.
             </div>
             <button className="btn-primary" disabled={!notesFile || busy !== null}><UploadCloud size={16} /> {busy === 'notes' ? 'Import en cours…' : 'Importer les notes'}</button>
             {notesResult ? <div className={`rounded-xl p-3 text-sm border ${notesResult.startsWith('Erreur') ? 'bg-red-50 border-red-200 text-red-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>{notesResult}</div> : null}

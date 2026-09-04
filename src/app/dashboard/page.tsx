@@ -119,7 +119,7 @@ export default function DashboardPage() {
       {!sessions.length ? (
         <div className="card p-6">
           <h2 className="font-semibold">Commencez par créer une session</h2>
-          <p className="text-sm muted mt-1">Exemple : FISA S3E 24-27 Toulouse · code analytique tl42t201.</p>
+          <p className="text-sm muted mt-1">Vous pouvez créer une session ici ou importer directement un fichier de notes : toute session inconnue sera créée automatiquement.</p>
           <Link href="/dashboard/sessions" className="btn-primary mt-4">Créer une session</Link>
         </div>
       ) : null}

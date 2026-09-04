@@ -120,7 +120,7 @@ export default function RattrapagesPage() {
         <div><h1 className="page-title">Rattrapages</h1><p className="page-subtitle">Synthèse des convocations, organisation de matières en parallèle et repérage des échecs après rattrapage.</p></div>
         <div className="flex flex-wrap items-end gap-3">
           <SessionSelect sessions={sessions} value={sessionId} onChange={(id) => { setSessionId(id); const s = sessions.find((x) => x.id === id); if (s) setSemester(cycleYears(s.cycle)[0].semesters[0]); }} />
-          <label className="block min-w-[130px]"><span className="form-label">Semestre</span><select className="form-input" value={semester} onChange={(e) => setSemester(Number(e.target.value))}>{currentSession ? cycleYears(currentSession.cycle).flatMap((y) => y.semesters).map((n) => <option key={n} value={n}>S{n}</option>) : null}</select></label>
+          <label className="block min-w-[130px]"><span className="form-label">Semestre</span><select className="form-select" value={semester} onChange={(e) => setSemester(Number(e.target.value))}>{currentSession ? cycleYears(currentSession.cycle).flatMap((y) => y.semesters).map((n) => <option key={n} value={n}>S{n}</option>) : null}</select></label>
           <button className="btn-secondary" onClick={() => loadData()}><RefreshCw size={16} /> Actualiser</button>
           <button className="btn-primary" onClick={exportExcel} disabled={!evaluations.length}><Download size={16} /> Export Excel</button>
         </div>

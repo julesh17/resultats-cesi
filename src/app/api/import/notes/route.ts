@@ -1,14 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { parseNotesWorkbook, fuzzyScore } from '@/lib/excel';
+import { parseNotesWorkbook, fuzzyScore, type NotesImportRow } from '@/lib/excel';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { requireApiUser } from '@/lib/server/auth';
 import { syncDebtsForSession } from '@/lib/server/debts';
-import { slugify } from '@/lib/utils';
+import { normalizeAnalyticCode, normalizeText, slugify } from '@/lib/utils';
+import type { CycleType } from '@/lib/types';
+
+type SessionRow = {
+  id: string;
+  name: string;
+  analytic_code: string | null;
+  cycle: CycleType;
+};
 
 function chunks<T>(array: T[], size = 800) {
   const out: T[][] = [];
   for (let i = 0; i < array.length; i += size) out.push(array.slice(i, i + size));
   return out;
+}
+
+function inferCycle(rows: NotesImportRow[]): CycleType {
+  const semesters = rows.flatMap((row) => row.grades.map((grade) => grade.semester));
+  if (semesters.length) return semesters.some((semester) => semester >= 5) ? 'ingenieur' : 'cpi';
+  return normalizeText(rows[0]?.sessionName || '').includes('cpi') ? 'cpi' : 'ingenieur';
 }
 
 export async function POST(request: NextRequest) {
@@ -23,17 +37,92 @@ export async function POST(request: NextRequest) {
 
     const buffer = await file.arrayBuffer();
     const parsedRows = parseNotesWorkbook(buffer);
-    const sessionNames = [...new Set(parsedRows.map((r) => r.sessionName))];
     const admin = getSupabaseAdmin();
-    const { data: sessionRows, error: sessionError } = await admin.from('sessions').select('*').in('name', sessionNames);
-    if (sessionError) throw new Error(sessionError.message);
-    const sessionByName = new Map((sessionRows || []).map((s) => [s.name, s]));
-    const unknown = sessionNames.filter((name) => !sessionByName.has(name));
-    if (unknown.length) {
-      return NextResponse.json({
-        error: 'Certaines sessions du fichier n’existent pas encore. Créez-les d’abord dans l’onglet Sessions.',
-        unknown_sessions: unknown,
-      }, { status: 400 });
+
+    // Un même import peut contenir plusieurs sessions. Les variantes de casse/accents
+    // du nom sont regroupées afin d'éviter de créer des doublons artificiels.
+    const groups = new Map<string, { name: string; rows: NotesImportRow[] }>();
+    for (const row of parsedRows) {
+      const key = normalizeText(row.sessionName);
+      const existing = groups.get(key);
+      if (existing) existing.rows.push(row);
+      else groups.set(key, { name: row.sessionName, rows: [row] });
+    }
+
+    const { data: existingRows, error: sessionError } = await admin
+      .from('sessions')
+      .select('id,name,analytic_code,cycle');
+    if (sessionError) throw new Error(`Lecture des sessions : ${sessionError.message}`);
+
+    const knownSessions = [...((existingRows || []) as SessionRow[])];
+    const resolvedGroups: Array<{ name: string; rows: NotesImportRow[]; session: SessionRow }> = [];
+    let sessionsCreated = 0;
+    let sessionsWithoutCode = 0;
+
+    for (const group of groups.values()) {
+      const providedCodes = [...new Set(
+        group.rows
+          .map((row) => row.sessionAnalyticCode ? normalizeAnalyticCode(row.sessionAnalyticCode) : '')
+          .filter(Boolean),
+      )];
+      if (providedCodes.length > 1) {
+        throw new Error(`Plusieurs codes analytiques différents sont indiqués pour la session « ${group.name} » : ${providedCodes.join(', ')}.`);
+      }
+      const providedCode = providedCodes[0] || '';
+
+      const byName = knownSessions.find((session) => normalizeText(session.name) === normalizeText(group.name));
+      const byCode = providedCode
+        ? knownSessions.find((session) => session.analytic_code && normalizeAnalyticCode(session.analytic_code) === providedCode)
+        : undefined;
+
+      if (
+        byName?.analytic_code &&
+        providedCode &&
+        normalizeAnalyticCode(byName.analytic_code) !== providedCode
+      ) {
+        throw new Error(
+          `La session « ${group.name} » existe déjà avec le code analytique « ${byName.analytic_code} », alors que le fichier indique « ${providedCode} ».`,
+        );
+      }
+
+      let session = byName || byCode;
+
+      if (!session) {
+        const insert = await admin.from('sessions').insert({
+          name: group.name.trim(),
+          analytic_code: providedCode || null,
+          cycle: inferCycle(group.rows),
+          created_by: auth.user.id,
+        }).select('id,name,analytic_code,cycle').single();
+
+        if (insert.error || !insert.data) {
+          throw new Error(`Création automatique de la session « ${group.name} » : ${insert.error?.message || 'échec inconnu'}`);
+        }
+        session = insert.data as SessionRow;
+        knownSessions.push(session);
+        sessionsCreated += 1;
+
+        // L'utilisateur qui réalise l'import suit automatiquement la session créée.
+        const follow = await admin.from('session_subscriptions').upsert({
+          user_id: auth.user.id,
+          session_id: session.id,
+        });
+        if (follow.error) throw new Error(`Abonnement à la session « ${group.name} » : ${follow.error.message}`);
+      } else if (!session.analytic_code && providedCode) {
+        const update = await admin
+          .from('sessions')
+          .update({ analytic_code: providedCode })
+          .eq('id', session.id)
+          .select('id,name,analytic_code,cycle')
+          .single();
+        if (update.error || !update.data) throw new Error(`Mise à jour du code analytique : ${update.error?.message || 'échec inconnu'}`);
+        session = update.data as SessionRow;
+        const index = knownSessions.findIndex((candidate) => candidate.id === session!.id);
+        if (index >= 0) knownSessions[index] = session;
+      }
+
+      if (!session.analytic_code) sessionsWithoutCode += 1;
+      resolvedGroups.push({ ...group, session });
     }
 
     const safeName = `${Date.now()}-${slugify(file.name.replace(/\.xlsx$/i, '')) || 'notes'}.xlsx`;
@@ -44,6 +133,7 @@ export async function POST(request: NextRequest) {
     });
     if (upload.error) throw new Error(`Stockage du fichier : ${upload.error.message}`);
 
+    const sessionNames = resolvedGroups.map((group) => group.session.name);
     const historyInsert = await admin.from('import_history').insert({
       kind: 'notes',
       file_name: file.name,
@@ -51,7 +141,11 @@ export async function POST(request: NextRequest) {
       session_id: null,
       imported_by: auth.user.id,
       rows_count: parsedRows.length,
-      metadata: { sessions: sessionNames },
+      metadata: {
+        sessions: sessionNames,
+        sessions_created: sessionsCreated,
+        sessions_without_analytic_code: sessionsWithoutCode,
+      },
     }).select('id').single();
     if (historyInsert.error) throw new Error(historyInsert.error.message);
     const importId = historyInsert.data.id;
@@ -61,17 +155,17 @@ export async function POST(request: NextRequest) {
     let gradeCount = 0;
     const touchedSessionIds = new Set<string>();
 
-    for (const sessionName of sessionNames) {
-      const session = sessionByName.get(sessionName)!;
+    for (const group of resolvedGroups) {
+      const { session, rows } = group;
+      const sessionName = session.name;
       touchedSessionIds.add(session.id);
-      const rows = parsedRows.filter((r) => r.sessionName === sessionName);
 
-      const studentPayload = rows.map((r) => ({
+      const studentPayload = rows.map((row) => ({
         session_id: session.id,
-        person_key: r.personKey,
-        first_name: r.firstName,
-        last_name: r.lastName,
-        option_name: r.optionName,
+        person_key: row.personKey,
+        first_name: row.firstName,
+        last_name: row.lastName,
+        option_name: row.optionName,
         active: true,
       }));
       const { data: importedStudents, error: studentError } = await admin
@@ -80,31 +174,32 @@ export async function POST(request: NextRequest) {
         .select('*');
       if (studentError) throw new Error(`Étudiants (${sessionName}) : ${studentError.message}`);
       studentCount += importedStudents?.length || 0;
-      const studentByKey = new Map((importedStudents || []).map((s) => [s.person_key, s]));
+      const studentByKey = new Map(((importedStudents || []) as Array<{ id: string; person_key: string }>).map((student) => [student.person_key, student]));
 
       const { data: existingEvals, error: evalReadError } = await admin
         .from('evaluations')
         .select('*')
         .eq('session_id', session.id);
       if (evalReadError) throw new Error(evalReadError.message);
-      const localEvals = [...(existingEvals || [])];
+      const localEvals = [...((existingEvals || []) as Array<any>)];
 
-      const gradeDescriptors = rows.flatMap((r) => r.grades);
+      const gradeDescriptors = rows.flatMap((row) => row.grades);
       const uniqueIncoming = new Map<string, (typeof gradeDescriptors)[number]>();
-      gradeDescriptors.forEach((g) => uniqueIncoming.set(`${g.semester}:${g.normalizedName}`, g));
+      gradeDescriptors.forEach((grade) => uniqueIncoming.set(`${grade.semester}:${grade.normalizedName}`, grade));
 
       for (const incoming of uniqueIncoming.values()) {
-        let match = localEvals.find((e) => e.semester === incoming.semester && e.normalized_name === incoming.normalizedName);
+        let match = localEvals.find((evaluation) => evaluation.semester === incoming.semester && evaluation.normalized_name === incoming.normalizedName);
         if (!match) {
           const candidates = localEvals
-            .filter((e) => e.semester === incoming.semester)
-            .map((e) => ({ e, score: fuzzyScore(e.name, incoming.evaluationName) }))
+            .filter((evaluation) => evaluation.semester === incoming.semester)
+            .map((evaluation) => ({ evaluation, score: fuzzyScore(evaluation.name, incoming.evaluationName) }))
             .sort((a, b) => b.score - a.score);
-          if (candidates[0]?.score >= 60) match = candidates[0].e;
+          if (candidates[0]?.score >= 60) match = candidates[0].evaluation;
         }
         if (match) {
           if (!match.active) {
-            await admin.from('evaluations').update({ active: true, source_name: incoming.evaluationName }).eq('id', match.id);
+            const reactivation = await admin.from('evaluations').update({ active: true, source_name: incoming.evaluationName }).eq('id', match.id);
+            if (reactivation.error) throw new Error(`Réactivation de l’évaluation : ${reactivation.error.message}`);
             match.active = true;
           }
         } else {
@@ -127,23 +222,23 @@ export async function POST(request: NextRequest) {
       for (const row of rows) {
         const student = studentByKey.get(row.personKey);
         if (!student) continue;
-        for (const g of row.grades) {
-          let evaluation = localEvals.find((e) => e.semester === g.semester && e.normalized_name === g.normalizedName);
+        for (const grade of row.grades) {
+          let evaluation = localEvals.find((candidate) => candidate.semester === grade.semester && candidate.normalized_name === grade.normalizedName);
           if (!evaluation) {
             evaluation = localEvals
-              .filter((e) => e.semester === g.semester)
-              .map((e) => ({ e, score: fuzzyScore(e.name, g.evaluationName) }))
-              .sort((a, b) => b.score - a.score)[0]?.e;
+              .filter((candidate) => candidate.semester === grade.semester)
+              .map((candidate) => ({ candidate, score: fuzzyScore(candidate.name, grade.evaluationName) }))
+              .sort((a, b) => b.score - a.score)[0]?.candidate;
           }
           if (!evaluation) continue;
           gradesPayload.push({
             student_id: student.id,
             evaluation_id: evaluation.id,
-            raw_mention: g.rawMention,
-            initial_mention: g.initialMention,
-            final_mention: g.finalMention,
-            numeric_note_text: g.numericNoteText,
-            absence: g.absence,
+            raw_mention: grade.rawMention,
+            initial_mention: grade.initialMention,
+            final_mention: grade.finalMention,
+            numeric_note_text: grade.numericNoteText,
+            absence: grade.absence,
             import_id: importId,
             manual_override: false,
             updated_by: auth.user.id,
@@ -165,12 +260,14 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       ok: true,
-      sessions: sessionNames.length,
+      sessions: resolvedGroups.length,
+      sessions_created: sessionsCreated,
+      sessions_without_analytic_code: sessionsWithoutCode,
       students: studentCount,
       evaluations_created: evaluationCount,
       grades: gradeCount,
-      debts_detected: debtSync.reduce((s, x) => s + x.detected, 0),
-      debts_created: debtSync.reduce((s, x) => s + x.inserted, 0),
+      debts_detected: debtSync.reduce((sum, item) => sum + item.detected, 0),
+      debts_created: debtSync.reduce((sum, item) => sum + item.inserted, 0),
     });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : 'Import impossible.' }, { status: 500 });

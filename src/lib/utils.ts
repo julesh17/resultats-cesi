@@ -9,6 +9,11 @@ export function normalizeText(value: string): string {
     .replace(/\s+/g, ' ');
 }
 
+
+export function normalizeAnalyticCode(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 export function slugify(value: string): string {
   return normalizeText(value).replace(/\s+/g, '-').replace(/^-+|-+$/g, '');
 }

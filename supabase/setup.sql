@@ -30,13 +30,63 @@ create table if not exists public.profiles (
 create table if not exists public.sessions (
   id uuid primary key default gen_random_uuid(),
   name text not null unique,
-  analytic_code text not null unique,
+  analytic_code text unique,
   cycle public.cycle_type not null,
-  campus text default 'Toulouse',
   created_by uuid references public.profiles(id) on delete set null default auth.uid(),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+
+-- Compatibilité avec une base créée par une version antérieure.
+-- Le campus n'est plus une information demandée par l'application.
+alter table public.sessions alter column analytic_code drop not null;
+alter table public.sessions drop column if exists campus;
+
+-- Le code analytique est insensible à la casse : TL42 = tl42.
+-- Si une ancienne base contient déjà deux codes ne différant que par la casse,
+-- on conserve le premier et on laisse l'autre code vide plutôt que de supprimer une session.
+with ranked_codes as (
+  select
+    id,
+    row_number() over (
+      partition by lower(trim(analytic_code))
+      order by created_at nulls last, id
+    ) as rn
+  from public.sessions
+  where nullif(trim(analytic_code), '') is not null
+)
+update public.sessions s
+set analytic_code = null
+from ranked_codes r
+where s.id = r.id and r.rn > 1;
+
+update public.sessions
+set analytic_code = null
+where analytic_code is not null and trim(analytic_code) = '';
+
+update public.sessions
+set analytic_code = lower(trim(analytic_code))
+where analytic_code is not null;
+
+create or replace function public.normalize_session_analytic_code()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.analytic_code := nullif(lower(trim(new.analytic_code)), '');
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_normalize_session_analytic_code on public.sessions;
+create trigger trg_normalize_session_analytic_code
+before insert or update of analytic_code on public.sessions
+for each row execute function public.normalize_session_analytic_code();
+
+create unique index if not exists sessions_analytic_code_ci_unique
+on public.sessions (lower(analytic_code))
+where analytic_code is not null;
 
 create table if not exists public.session_years (
   id uuid primary key default gen_random_uuid(),
@@ -330,13 +380,19 @@ declare
   v_username text;
   v_display_name text;
 begin
-  v_username := lower(trim(coalesce(new.raw_user_meta_data ->> 'username', '')));
-  v_display_name := trim(coalesce(new.raw_user_meta_data ->> 'display_name', ''));
+  v_username := lower(trim(coalesce(
+    nullif(new.raw_user_meta_data ->> 'username', ''),
+    split_part(coalesce(new.email, ''), '@', 1)
+  )));
+  v_display_name := trim(coalesce(
+    nullif(new.raw_user_meta_data ->> 'display_name', ''),
+    nullif(new.raw_user_meta_data ->> 'username', ''),
+    split_part(coalesce(new.email, ''), '@', 1)
+  ));
 
   if v_username = '' then
     raise exception 'Pseudo absent lors de la création du compte.';
   end if;
-
   if v_display_name = '' then
     v_display_name := v_username;
   end if;
@@ -355,3 +411,52 @@ drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
 after insert on auth.users
 for each row execute procedure public.handle_new_user();
+
+-- Répare également les éventuels comptes Auth déjà créés sans profil.
+insert into public.profiles (id, username, display_name)
+select
+  u.id,
+  lower(trim(coalesce(
+    nullif(u.raw_user_meta_data ->> 'username', ''),
+    split_part(u.email, '@', 1)
+  ))),
+  trim(coalesce(
+    nullif(u.raw_user_meta_data ->> 'display_name', ''),
+    nullif(u.raw_user_meta_data ->> 'username', ''),
+    split_part(u.email, '@', 1)
+  ))
+from auth.users u
+where not exists (select 1 from public.profiles p where p.id = u.id)
+  and coalesce(u.email, '') <> ''
+on conflict (id) do nothing;
+
+-- IMPORTANT : RLS ne suffit pas à lui seul. PostgreSQL exige aussi les privilèges
+-- de table. Sans ces GRANT, le navigateur renvoie par exemple
+-- « permission denied for table sessions » avant même d'évaluer la policy RLS.
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on table
+  public.profiles,
+  public.sessions,
+  public.session_years,
+  public.semesters,
+  public.session_subscriptions,
+  public.students,
+  public.ues,
+  public.evaluations,
+  public.import_history,
+  public.grades,
+  public.debts,
+  public.jury_records,
+  public.preconisations,
+  public.jury_preconisations
+to authenticated;
+
+grant usage, select on all sequences in schema public to authenticated;
+
+-- Les futures tables/séquences créées par le même propriétaire héritent aussi
+-- des droits nécessaires aux comptes connectés.
+alter default privileges in schema public
+  grant select, insert, update, delete on tables to authenticated;
+alter default privileges in schema public
+  grant usage, select on sequences to authenticated;
+

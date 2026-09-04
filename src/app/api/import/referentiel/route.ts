@@ -5,6 +5,16 @@ import { requireApiUser } from '@/lib/server/auth';
 import { syncDebtsForSession } from '@/lib/server/debts';
 import { slugify } from '@/lib/utils';
 
+type UeDbRow = { id: string; semester: number; name: string };
+type EvalDbRow = {
+  id: string;
+  semester: number;
+  name: string;
+  normalized_name: string;
+  ue_id: string | null;
+  coefficient: number;
+};
+
 export async function POST(request: NextRequest) {
   const auth = await requireApiUser(request);
   if (!auth.user) return NextResponse.json({ error: auth.error }, { status: 401 });
@@ -66,14 +76,15 @@ export async function POST(request: NextRequest) {
       .upsert(uePayload, { onConflict: 'session_id,semester,name' })
       .select('*');
     if (ueError) throw new Error(`UE : ${ueError.message}`);
-    const ueByKey = new Map((upsertedUes || []).map((u) => [`${u.semester}:${u.name}`, u]));
+    const ueRows = (upsertedUes || []) as UeDbRow[];
+    const ueByKey = new Map(ueRows.map((u) => [`${u.semester}:${u.name}`, u]));
 
     const { data: existingEvals, error: existingError } = await admin
       .from('evaluations')
       .select('*')
       .eq('session_id', sessionId);
     if (existingError) throw new Error(existingError.message);
-    const localEvals = [...(existingEvals || [])];
+    const localEvals = [...((existingEvals || []) as EvalDbRow[])];
     let matched = 0;
     let created = 0;
 
@@ -111,7 +122,7 @@ export async function POST(request: NextRequest) {
           active: true,
         }).select('*').single();
         if (insert.error) throw new Error(insert.error.message);
-        localEvals.push(insert.data);
+        localEvals.push(insert.data as EvalDbRow);
         created += 1;
       }
     }

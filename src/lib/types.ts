@@ -12,9 +12,8 @@ export interface Profile {
 export interface CesiSession {
   id: string;
   name: string;
-  analytic_code: string;
+  analytic_code: string | null;
   cycle: CycleType;
-  campus: string | null;
   created_at?: string;
 }
 

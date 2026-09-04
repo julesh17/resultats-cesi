@@ -170,7 +170,7 @@ export default function NotesPage() {
             const s = sessions.find((x) => x.id === id);
             if (s) setSemester(cycleYears(s.cycle)[0].semesters[0]);
           }} />
-          <label className="block min-w-[140px]"><span className="form-label">Semestre</span><select className="form-input" value={semester} onChange={(e) => setSemester(Number(e.target.value))}>{currentSession ? cycleYears(currentSession.cycle).flatMap((y) => y.semesters).map((s) => <option key={s} value={s}>S{s}</option>) : null}</select></label>
+          <label className="block min-w-[140px]"><span className="form-label">Semestre</span><select className="form-select" value={semester} onChange={(e) => setSemester(Number(e.target.value))}>{currentSession ? cycleYears(currentSession.cycle).flatMap((y) => y.semesters).map((s) => <option key={s} value={s}>S{s}</option>) : null}</select></label>
           <button className="btn-secondary" onClick={() => loadData()}><RefreshCw size={16} /> Actualiser</button>
           <button className="btn-primary" onClick={exportView} disabled={!students.length}><Download size={16} /> Export Excel</button>
         </div>
@@ -255,7 +255,7 @@ export default function NotesPage() {
             <div className="rounded-xl bg-gray-50 p-3 text-xs muted">Saisissez par exemple <strong>B</strong> ou <strong>C/B</strong>. En cas de slash, la dernière lettre est celle qui prime et qui s’affiche. AJ et ANJ ont pour le moment le même effet dans les calculs.</div>
             <label className="block"><span className="form-label">Mention / rattrapage</span><input name="mention" className="form-input" defaultValue={selected.grade?.raw_mention || ''} placeholder="A, B, C, D ou C/B" /></label>
             <label className="block"><span className="form-label">Note numérique / détail</span><input name="numeric" className="form-input" defaultValue={selected.grade?.numeric_note_text || ''} placeholder="ex. 8,5 / 20 ou DS : ..." /></label>
-            <label className="block"><span className="form-label">Absence</span><select name="absence" className="form-input" defaultValue={selected.grade?.absence || ''}><option value="">Aucune</option><option value="AJ">AJ — absence justifiée</option><option value="ANJ">ANJ — absence injustifiée</option></select></label>
+            <label className="block"><span className="form-label">Absence</span><select name="absence" className="form-select" defaultValue={selected.grade?.absence || ''}><option value="">Aucune</option><option value="AJ">AJ — absence justifiée</option><option value="ANJ">ANJ — absence injustifiée</option></select></label>
             {error ? <div className="rounded-xl bg-red-50 border border-red-200 p-3 text-sm text-red-700">{error}</div> : null}
             <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={() => setSelected(null)}>Annuler</button><button className="btn-primary">Enregistrer</button></div>
           </form>
