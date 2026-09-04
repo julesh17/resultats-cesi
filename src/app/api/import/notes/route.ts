@@ -161,14 +161,21 @@ export async function POST(request: NextRequest) {
       const sessionName = session.name;
       touchedSessionIds.add(session.id);
 
-      const studentPayload = rows.map((row) => ({
-        session_id: session.id,
-        person_key: row.personKey,
-        first_name: row.firstName,
-        last_name: row.lastName,
-        option_name: row.optionName,
-        active: true,
-      }));
+      // Un fichier peut exceptionnellement contenir plusieurs lignes pour la même personne.
+      // PostgreSQL refuse un UPSERT si la même clé de conflit apparaît deux fois dans une
+      // seule commande ; on déduplique donc avant l'envoi à Supabase.
+      const studentPayloadByKey = new Map<string, Record<string, unknown>>();
+      for (const row of rows) {
+        studentPayloadByKey.set(row.personKey, {
+          session_id: session.id,
+          person_key: row.personKey,
+          first_name: row.firstName,
+          last_name: row.lastName,
+          option_name: row.optionName,
+          active: true,
+        });
+      }
+      const studentPayload = [...studentPayloadByKey.values()];
       const { data: importedStudents, error: studentError } = await admin
         .from('students')
         .upsert(studentPayload, { onConflict: 'session_id,person_key' })
@@ -188,21 +195,43 @@ export async function POST(request: NextRequest) {
       const uniqueIncoming = new Map<string, (typeof gradeDescriptors)[number]>();
       gradeDescriptors.forEach((grade) => uniqueIncoming.set(`${grade.semester}:${grade.normalizedName}`, grade));
 
-      for (const incoming of uniqueIncoming.values()) {
-        let match = localEvals.find((evaluation) => evaluation.semester === incoming.semester && evaluation.normalized_name === incoming.normalizedName);
+      // Résolution stable « colonne Excel -> évaluation DB ». Une correspondance floue ne
+      // peut être utilisée que par une seule colonne entrante. Sans cela, deux colonnes
+      // proches peuvent pointer vers la même evaluation_id et produire deux lignes avec la
+      // même clé (student_id, evaluation_id) dans le même UPSERT.
+      const evaluationByIncomingKey = new Map<string, any>();
+      const claimedFuzzyEvaluationIds = new Set<string>();
+
+      for (const [incomingKey, incoming] of uniqueIncoming.entries()) {
+        let match = localEvals.find(
+          (evaluation) => evaluation.semester === incoming.semester && evaluation.normalized_name === incoming.normalizedName,
+        );
+
         if (!match) {
           const candidates = localEvals
-            .filter((evaluation) => evaluation.semester === incoming.semester)
+            .filter(
+              (evaluation) =>
+                evaluation.semester === incoming.semester &&
+                !claimedFuzzyEvaluationIds.has(evaluation.id),
+            )
             .map((evaluation) => ({ evaluation, score: fuzzyScore(evaluation.name, incoming.evaluationName) }))
             .sort((a, b) => b.score - a.score);
-          if (candidates[0]?.score >= 60) match = candidates[0].evaluation;
+          if (candidates[0]?.score >= 60) {
+            match = candidates[0].evaluation;
+            claimedFuzzyEvaluationIds.add(match.id);
+          }
         }
+
         if (match) {
           if (!match.active) {
-            const reactivation = await admin.from('evaluations').update({ active: true, source_name: incoming.evaluationName }).eq('id', match.id);
+            const reactivation = await admin
+              .from('evaluations')
+              .update({ active: true, source_name: incoming.evaluationName })
+              .eq('id', match.id);
             if (reactivation.error) throw new Error(`Réactivation de l’évaluation : ${reactivation.error.message}`);
             match.active = true;
           }
+          evaluationByIncomingKey.set(incomingKey, match);
         } else {
           const inserted = await admin.from('evaluations').insert({
             session_id: session.id,
@@ -215,24 +244,22 @@ export async function POST(request: NextRequest) {
           }).select('*').single();
           if (inserted.error) throw new Error(`Évaluation : ${inserted.error.message}`);
           localEvals.push(inserted.data);
+          evaluationByIncomingKey.set(incomingKey, inserted.data);
           evaluationCount += 1;
         }
       }
 
-      const gradesPayload = [] as Array<Record<string, unknown>>;
+      // Dernière protection : une seule ligne par clé de conflit. Cela rend aussi l'import
+      // idempotent si le fichier contient accidentellement des doublons de lignes.
+      const gradesPayloadByKey = new Map<string, Record<string, unknown>>();
       for (const row of rows) {
         const student = studentByKey.get(row.personKey);
         if (!student) continue;
         for (const grade of row.grades) {
-          let evaluation = localEvals.find((candidate) => candidate.semester === grade.semester && candidate.normalized_name === grade.normalizedName);
-          if (!evaluation) {
-            evaluation = localEvals
-              .filter((candidate) => candidate.semester === grade.semester)
-              .map((candidate) => ({ candidate, score: fuzzyScore(candidate.name, grade.evaluationName) }))
-              .sort((a, b) => b.score - a.score)[0]?.candidate;
-          }
+          const incomingKey = `${grade.semester}:${grade.normalizedName}`;
+          const evaluation = evaluationByIncomingKey.get(incomingKey);
           if (!evaluation) continue;
-          gradesPayload.push({
+          gradesPayloadByKey.set(`${student.id}:${evaluation.id}`, {
             student_id: student.id,
             evaluation_id: evaluation.id,
             raw_mention: grade.rawMention,
@@ -246,6 +273,7 @@ export async function POST(request: NextRequest) {
           });
         }
       }
+      const gradesPayload = [...gradesPayloadByKey.values()];
 
       for (const batch of chunks(gradesPayload)) {
         const upsert = await admin.from('grades').upsert(batch, { onConflict: 'student_id,evaluation_id' });

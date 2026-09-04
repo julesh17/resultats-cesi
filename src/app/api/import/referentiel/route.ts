@@ -88,6 +88,7 @@ export async function POST(request: NextRequest) {
     const localEvals = [...((existingEvals || []) as EvalDbRow[])];
     let matched = 0;
     let created = 0;
+    const claimedFuzzyEvaluationIds = new Set<string>();
 
     for (const row of parsed) {
       const ue = ueByKey.get(`${row.semester}:${row.ueName}`);
@@ -95,10 +96,13 @@ export async function POST(request: NextRequest) {
       let match = localEvals.find((e) => e.semester === row.semester && e.normalized_name === row.normalizedName);
       if (!match) {
         const best = localEvals
-          .filter((e) => e.semester === row.semester)
+          .filter((e) => e.semester === row.semester && !claimedFuzzyEvaluationIds.has(e.id))
           .map((e) => ({ e, score: fuzzyScore(e.name, row.evaluationName) }))
           .sort((a, b) => b.score - a.score)[0];
-        if (best?.score >= 60) match = best.e;
+        if (best?.score >= 60) {
+          match = best.e;
+          claimedFuzzyEvaluationIds.add(match.id);
+        }
       }
 
       if (match) {
