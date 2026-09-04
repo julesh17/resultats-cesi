@@ -104,7 +104,7 @@
   animation: ambientFloat 12s ease-in-out infinite;
 }
 
-/* Petites aides visuelles spécifiques à Résultats CESI */
+/* Petites aides visuelles spécifiques à Résultats-CESI */
 .grade-a { background:#ecfdf5; color:#047857; border-color:#a7f3d0; }
 .grade-b { background:#eff6ff; color:#1d4ed8; border-color:#bfdbfe; }
 .grade-c { background:#fffbeb; color:#b45309; border-color:#fde68a; }
