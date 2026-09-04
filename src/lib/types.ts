@@ -47,6 +47,7 @@ export interface Evaluation {
   semester: number;
   name: string;
   normalized_name: string;
+  source_key: string | null;
   source_name: string | null;
   coefficient: number;
   ue_id: string | null;

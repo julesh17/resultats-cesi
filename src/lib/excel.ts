@@ -12,6 +12,7 @@ export type NotesImportRow = {
   optionName: string | null;
   grades: Array<{
     evaluationName: string;
+    sourceKey: string;
     normalizedName: string;
     semester: number;
     rawMention: string | null;
@@ -117,15 +118,21 @@ export function parseNotesWorkbook(buffer: ArrayBuffer): NotesImportRow[] {
     return {
       evalColumn,
       suffix,
+      sourceKey: `excel:${evalColumn.trim()}`,
       normalizedName: normalizeText(suffix),
       semeColumn,
       notesColumn,
       absenceColumn,
       semester: semester || 0,
     };
-  }).filter((descriptor) => descriptor.semester >= 1 && descriptor.semester <= 10);
+  });
 
-  if (!descriptors.length) throw new Error('Aucun semestre exploitable n’a été trouvé dans le fichier de notes.');
+  const invalidDescriptors = descriptors.filter((descriptor) => descriptor.semester < 1 || descriptor.semester > 10);
+  if (invalidDescriptors.length) {
+    throw new Error(
+      `Semestre introuvable pour ${invalidDescriptors.length} matière(s) : ${invalidDescriptors.slice(0, 8).map((item) => item.suffix).join(', ')}${invalidDescriptors.length > 8 ? '…' : ''}`
+    );
+  }
 
   return rows
     .filter((row) => String(row.Session || '').trim() && String(row.Personne || '').trim())
@@ -152,6 +159,7 @@ export function parseNotesWorkbook(buffer: ArrayBuffer): NotesImportRow[] {
 
         return {
           evaluationName: descriptor.suffix,
+          sourceKey: descriptor.sourceKey,
           normalizedName: descriptor.normalizedName,
           semester: descriptor.semester,
           rawMention: absence ? null : parsed.raw,

@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useState } from 'react';
-import { FileSpreadsheet, UploadCloud, History } from 'lucide-react';
+import { FileSpreadsheet, UploadCloud, History, Trash2 } from 'lucide-react';
 import Loading from '@/components/Loading';
 import SessionSelect from '@/components/SessionSelect';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
@@ -55,6 +55,32 @@ export default function ImportsPage() {
       throw new Error(json.error || 'Import impossible.');
     }
     return json;
+  }
+
+
+  async function deleteHistory(id?: string) {
+    const all = !id;
+    const ok = window.confirm(all
+      ? 'Supprimer tout l’historique des importations ? Les notes et référentiels déjà enregistrés sont conservés.'
+      : 'Supprimer ce log d’importation ? Les données pédagogiques importées sont conservées.');
+    if (!ok) return;
+    try {
+      const { data } = await getSupabaseBrowser().auth.getSession();
+      if (!data.session) throw new Error('Session expirée.');
+      const response = await fetch('/api/import/history', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${data.session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(id ? { id } : { all: true }),
+      });
+      const json = await response.json();
+      if (!response.ok) throw new Error(json.error || 'Suppression impossible.');
+      await load();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Suppression impossible.');
+    }
   }
 
   async function importNotes(event: FormEvent) {
@@ -132,10 +158,13 @@ export default function ImportsPage() {
       </div>
 
       <section className="card overflow-hidden">
-        <div className="px-5 py-4 border-b flex items-center gap-2" style={{ borderColor: 'var(--border)' }}><History size={18} className="text-blue-600" /><h2 className="section-title">Derniers imports</h2></div>
+        <div className="px-5 py-4 border-b flex items-center justify-between gap-3" style={{ borderColor: 'var(--border)' }}>
+          <div className="flex items-center gap-2"><History size={18} className="text-blue-600" /><h2 className="section-title">Derniers imports</h2></div>
+          {history.length ? <button className="btn-secondary !text-red-600" type="button" onClick={() => deleteHistory()}><Trash2 size={15} /> Tout effacer</button> : null}
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[700px]">
-            <thead><tr><th className="table-header">Date</th><th className="table-header">Type</th><th className="table-header">Fichier</th><th className="table-header">Session</th><th className="table-header text-right">Lignes</th></tr></thead>
+            <thead><tr><th className="table-header">Date</th><th className="table-header">Type</th><th className="table-header">Fichier</th><th className="table-header">Session</th><th className="table-header text-right">Lignes</th><th className="table-header text-right">Action</th></tr></thead>
             <tbody>
               {history.map((row) => {
                 const session = sessions.find((s) => s.id === row.session_id);
@@ -145,9 +174,10 @@ export default function ImportsPage() {
                   <td className="table-cell font-medium">{row.file_name}</td>
                   <td className="table-cell">{session?.name || (row.kind === 'notes' ? 'Import multi-session' : '—')}</td>
                   <td className="table-cell text-right">{row.rows_count}</td>
+                  <td className="table-cell text-right"><button type="button" className="btn-secondary !p-2 !text-red-600" onClick={() => deleteHistory(row.id)} title="Supprimer ce log"><Trash2 size={15} /></button></td>
                 </tr>;
               })}
-              {!history.length ? <tr><td colSpan={5} className="p-8 text-center text-sm muted">Aucun import enregistré.</td></tr> : null}
+              {!history.length ? <tr><td colSpan={6} className="p-8 text-center text-sm muted">Aucun import enregistré.</td></tr> : null}
             </tbody>
           </table>
         </div>

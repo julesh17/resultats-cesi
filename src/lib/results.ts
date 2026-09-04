@@ -260,8 +260,9 @@ export function computeJury(
   cohortStudents: Student[] = [student],
 ): JuryComputed {
   const semesters = yearToSemesters(yearLabel);
-  const relevantEvals = evaluations.filter((e) => semesters.includes(e.semester) && e.active);
-  const relevantUes = ues.filter((u) => semesters.includes(u.semester) && u.active !== false);
+  const relevantUes = ues.filter((u) => semesters.includes(u.semester) && u.active !== false && !u.exclude_from_jury);
+  const relevantUeIds = new Set(relevantUes.map((u) => u.id));
+  const relevantEvals = evaluations.filter((e) => semesters.includes(e.semester) && e.active && Boolean(e.ue_id && relevantUeIds.has(e.ue_id)));
   const gradeMap = makeGradeMap(grades);
   const inferredBlankAbsences = makeInferredBlankAbsenceSet(cohortStudents, relevantEvals, grades);
   const results = computeStudentUEs(student.id, relevantUes, relevantEvals, gradeMap, inferredBlankAbsences);

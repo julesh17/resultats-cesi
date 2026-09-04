@@ -1,3 +1,42 @@
+-- Résultats CESI v7 — REINITIALISATION PROPRE D'UNE BASE EXISTANTE
+-- ATTENTION : ce script supprime les données pédagogiques Resultats CESI existantes
+-- (sessions, étudiants, notes, UE, dettes, jury et historique d'import).
+-- Les comptes Supabase Auth sont conservés et leurs profils sont recréés.
+
+begin;
+
+drop trigger if exists on_auth_user_created on auth.users;
+drop function if exists public.handle_new_user() cascade;
+drop function if exists public.create_session_structure() cascade;
+drop function if exists public.normalize_session_analytic_code() cascade;
+drop function if exists public.set_updated_at() cascade;
+
+drop table if exists public.jury_preconisations cascade;
+drop table if exists public.jury_records cascade;
+drop table if exists public.debts cascade;
+drop table if exists public.grades cascade;
+drop table if exists public.import_history cascade;
+drop table if exists public.evaluations cascade;
+drop table if exists public.ues cascade;
+drop table if exists public.students cascade;
+drop table if exists public.session_subscriptions cascade;
+drop table if exists public.semesters cascade;
+drop table if exists public.session_years cascade;
+drop table if exists public.sessions cascade;
+drop table if exists public.preconisations cascade;
+drop table if exists public.profiles cascade;
+
+drop type if exists public.import_kind cascade;
+drop type if exists public.jury_opinion cascade;
+drop type if exists public.debt_status cascade;
+drop type if exists public.absence_status cascade;
+drop type if exists public.cycle_type cascade;
+
+-- Les fichiers historiques du bucket privé ne sont pas supprimés directement en SQL.
+-- L'application peut supprimer proprement ses logs et fichiers via l'onglet Imports.
+
+commit;
+
 -- Résultats CESI — initialisation Supabase
 -- À exécuter UNE FOIS dans Supabase > SQL Editor > New query.
 

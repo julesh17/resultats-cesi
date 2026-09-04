@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { parseNotesWorkbook, fuzzyScore, type NotesImportRow } from '@/lib/excel';
+import { parseNotesWorkbook, type NotesImportRow } from '@/lib/excel';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { requireApiUser } from '@/lib/server/auth';
 import { syncDebtsForSession } from '@/lib/server/debts';
 import { normalizeAnalyticCode, normalizeText, slugify } from '@/lib/utils';
-import type { CycleType } from '@/lib/types';
+import type { CycleType, Evaluation } from '@/lib/types';
 import { publicServerError } from '@/lib/server/errors';
 
 type SessionRow = {
@@ -14,7 +14,9 @@ type SessionRow = {
   cycle: CycleType;
 };
 
-function chunks<T>(array: T[], size = 800) {
+type ImportedStudent = { id: string; person_key: string; active: boolean };
+
+function chunks<T>(array: T[], size = 700) {
   const out: T[][] = [];
   for (let i = 0; i < array.length; i += size) out.push(array.slice(i, i + size));
   return out;
@@ -44,16 +46,21 @@ export async function POST(request: NextRequest) {
       0,
     );
     const evaluationColumns = new Set(
-      parsedRows.flatMap((row) => row.grades.map((grade) => `${normalizeText(row.sessionName)}:${grade.semester}:${grade.normalizedName}`)),
+      parsedRows.flatMap((row) => row.grades.map((grade) => `${normalizeText(row.sessionName)}:${grade.sourceKey}`)),
     ).size;
     const expectedUniqueCells = new Set(
       parsedRows.flatMap((row) => row.grades.map((grade) =>
-        `${normalizeText(row.sessionName)}:${row.personKey}:${grade.semester}:${grade.normalizedName}`)),
+        `${normalizeText(row.sessionName)}:${row.personKey}:${grade.sourceKey}`)),
     ).size;
+
+    if (expectedUniqueCells !== expectedCells) {
+      throw new Error(`Le fichier contient des doublons de lignes ou de colonnes : ${expectedCells} cellules lues pour ${expectedUniqueCells} cellules distinctes.`);
+    }
+
     const admin = getSupabaseAdmin();
 
-    // Un même import peut contenir plusieurs sessions. Les variantes de casse/accents
-    // du nom sont regroupées afin d'éviter de créer des doublons artificiels.
+    // Un fichier peut contenir plusieurs sessions. Le nom sert uniquement à grouper
+    // les lignes du fichier ; le code analytique, lorsqu'il existe, reste insensible à la casse.
     const groups = new Map<string, { name: string; rows: NotesImportRow[] }>();
     for (const row of parsedRows) {
       const key = normalizeText(row.sessionName);
@@ -88,18 +95,11 @@ export async function POST(request: NextRequest) {
         ? knownSessions.find((session) => session.analytic_code && normalizeAnalyticCode(session.analytic_code) === providedCode)
         : undefined;
 
-      if (
-        byName?.analytic_code &&
-        providedCode &&
-        normalizeAnalyticCode(byName.analytic_code) !== providedCode
-      ) {
-        throw new Error(
-          `La session « ${group.name} » existe déjà avec le code analytique « ${byName.analytic_code} », alors que le fichier indique « ${providedCode} ».`,
-        );
+      if (byName?.analytic_code && providedCode && normalizeAnalyticCode(byName.analytic_code) !== providedCode) {
+        throw new Error(`La session « ${group.name} » existe déjà avec un autre code analytique.`);
       }
 
       let session = byName || byCode;
-
       if (!session) {
         const insert = await admin.from('sessions').insert({
           name: group.name.trim(),
@@ -107,33 +107,19 @@ export async function POST(request: NextRequest) {
           cycle: inferCycle(group.rows),
           created_by: auth.user.id,
         }).select('id,name,analytic_code,cycle').single();
-
-        if (insert.error || !insert.data) {
-          throw new Error(`Création automatique de la session « ${group.name} » : ${insert.error?.message || 'échec inconnu'}`);
-        }
+        if (insert.error || !insert.data) throw new Error(`Création automatique de la session « ${group.name} » : ${insert.error?.message || 'échec inconnu'}`);
         session = insert.data as SessionRow;
         knownSessions.push(session);
         sessionsCreated += 1;
-
-        // L'utilisateur qui réalise l'import suit automatiquement la session créée.
-        const follow = await admin.from('session_subscriptions').upsert({
-          user_id: auth.user.id,
-          session_id: session.id,
-        });
+        const follow = await admin.from('session_subscriptions').upsert({ user_id: auth.user.id, session_id: session.id });
         if (follow.error) throw new Error(`Abonnement à la session « ${group.name} » : ${follow.error.message}`);
       } else if (!session.analytic_code && providedCode) {
-        const update = await admin
-          .from('sessions')
-          .update({ analytic_code: providedCode })
-          .eq('id', session.id)
-          .select('id,name,analytic_code,cycle')
-          .single();
+        const update = await admin.from('sessions').update({ analytic_code: providedCode }).eq('id', session.id).select('id,name,analytic_code,cycle').single();
         if (update.error || !update.data) throw new Error(`Mise à jour du code analytique : ${update.error?.message || 'échec inconnu'}`);
         session = update.data as SessionRow;
         const index = knownSessions.findIndex((candidate) => candidate.id === session!.id);
         if (index >= 0) knownSessions[index] = session;
       }
-
       if (!session.analytic_code) sessionsWithoutCode += 1;
       resolvedGroups.push({ ...group, session });
     }
@@ -148,17 +134,9 @@ export async function POST(request: NextRequest) {
 
     const sessionNames = resolvedGroups.map((group) => group.session.name);
     const historyInsert = await admin.from('import_history').insert({
-      kind: 'notes',
-      file_name: file.name,
-      storage_path: storagePath,
-      session_id: null,
-      imported_by: auth.user.id,
-      rows_count: parsedRows.length,
-      metadata: {
-        sessions: sessionNames,
-        sessions_created: sessionsCreated,
-        sessions_without_analytic_code: sessionsWithoutCode,
-      },
+      kind: 'notes', file_name: file.name, storage_path: storagePath, session_id: null,
+      imported_by: auth.user.id, rows_count: parsedRows.length,
+      metadata: { sessions: sessionNames, sessions_created: sessionsCreated, sessions_without_analytic_code: sessionsWithoutCode },
     }).select('id').single();
     if (historyInsert.error) throw new Error(historyInsert.error.message);
     const importId = historyInsert.data.id;
@@ -170,12 +148,8 @@ export async function POST(request: NextRequest) {
 
     for (const group of resolvedGroups) {
       const { session, rows } = group;
-      const sessionName = session.name;
       touchedSessionIds.add(session.id);
 
-      // Un fichier peut exceptionnellement contenir plusieurs lignes pour la même personne.
-      // PostgreSQL refuse un UPSERT si la même clé de conflit apparaît deux fois dans une
-      // seule commande ; on déduplique donc avant l'envoi à Supabase.
       const studentPayloadByKey = new Map<string, Record<string, unknown>>();
       for (const row of rows) {
         studentPayloadByKey.set(row.personKey, {
@@ -187,90 +161,100 @@ export async function POST(request: NextRequest) {
         });
       }
       const studentPayload = [...studentPayloadByKey.values()];
-      const { data: importedStudents, error: studentError } = await admin
-        .from('students')
+      const studentUpsert = await admin.from('students')
         .upsert(studentPayload, { onConflict: 'session_id,person_key' })
-        .select('*');
-      if (studentError) throw new Error(`Étudiants (${sessionName}) : ${studentError.message}`);
-      studentCount += importedStudents?.length || 0;
-      const studentByKey = new Map(((importedStudents || []) as Array<{ id: string; person_key: string }>).map((student) => [student.person_key, student]));
+        .select('id,person_key,active');
+      if (studentUpsert.error) throw new Error(`Étudiants (${session.name}) : ${studentUpsert.error.message}`);
+      const importedStudents = (studentUpsert.data || []) as ImportedStudent[];
+      studentCount += importedStudents.length;
+      if (importedStudents.length !== studentPayload.length) {
+        throw new Error(`Étudiants (${session.name}) : ${studentPayload.length} lignes attendues, ${importedStudents.length} seulement retournées.`);
+      }
+      const studentByKey = new Map(importedStudents.map((student) => [student.person_key, student]));
 
-      const { data: existingEvals, error: evalReadError } = await admin
-        .from('evaluations')
-        .select('*')
-        .eq('session_id', session.id);
-      if (evalReadError) throw new Error(evalReadError.message);
-      const localEvals = [...((existingEvals || []) as Array<any>)];
+      const existing = await admin.from('evaluations').select('*').eq('session_id', session.id);
+      if (existing.error) throw new Error(`Matières (${session.name}) : ${existing.error.message}`);
+      const localEvals = [...((existing.data || []) as Evaluation[])];
 
-      const gradeDescriptors = rows.flatMap((row) => row.grades);
-      const uniqueIncoming = new Map<string, (typeof gradeDescriptors)[number]>();
-      gradeDescriptors.forEach((grade) => uniqueIncoming.set(`${grade.semester}:${grade.normalizedName}`, grade));
+      // Une colonne Excel est une matière distincte. Son identité est source_key,
+      // jamais une correspondance floue. C'est le point essentiel de la v7.
+      const uniqueIncoming = new Map<string, NotesImportRow['grades'][number]>();
+      for (const row of rows) for (const grade of row.grades) uniqueIncoming.set(grade.sourceKey, grade);
+      const evaluationBySourceKey = new Map<string, Evaluation>();
 
-      // Résolution stable « colonne Excel -> évaluation DB ». Une correspondance floue ne
-      // peut être utilisée que par une seule colonne entrante. Sans cela, deux colonnes
-      // proches peuvent pointer vers la même evaluation_id et produire deux lignes avec la
-      // même clé (student_id, evaluation_id) dans le même UPSERT.
-      const evaluationByIncomingKey = new Map<string, any>();
-      const claimedFuzzyEvaluationIds = new Set<string>();
+      for (const incoming of uniqueIncoming.values()) {
+        let match = localEvals.find((evaluation) => evaluation.source_key === incoming.sourceKey);
 
-      for (const [incomingKey, incoming] of uniqueIncoming.entries()) {
-        let match = localEvals.find(
-          (evaluation) => evaluation.semester === incoming.semester && evaluation.normalized_name === incoming.normalizedName,
-        );
-
+        // Si le référentiel a été importé avant les notes, son élément peut exister
+        // sans source_key. On ne l'adopte qu'en cas de correspondance exacte de nom
+        // normalisé et de semestre. Jamais de fuzzy matching pendant l'import des notes.
         if (!match) {
-          const candidates = localEvals
-            .filter(
-              (evaluation) =>
-                evaluation.semester === incoming.semester &&
-                !claimedFuzzyEvaluationIds.has(evaluation.id),
-            )
-            .map((evaluation) => ({ evaluation, score: fuzzyScore(evaluation.name, incoming.evaluationName) }))
-            .sort((a, b) => b.score - a.score);
-          if (candidates[0]?.score >= 60) {
-            match = candidates[0].evaluation;
-            claimedFuzzyEvaluationIds.add(match.id);
+          const exactWithoutSource = localEvals.filter((evaluation) =>
+            evaluation.semester === incoming.semester &&
+            evaluation.normalized_name === incoming.normalizedName &&
+            !evaluation.source_key,
+          );
+          if (exactWithoutSource.length > 1) {
+            throw new Error(`Plusieurs matières du référentiel correspondent exactement à « ${incoming.evaluationName} » en S${incoming.semester}.`);
+          }
+          if (exactWithoutSource.length === 1) {
+            const adopted = exactWithoutSource[0];
+            const update = await admin.from('evaluations').update({
+              source_key: incoming.sourceKey,
+              source_name: incoming.evaluationName,
+              name: incoming.evaluationName,
+              normalized_name: incoming.normalizedName,
+              active: true,
+            }).eq('id', adopted.id).select('*').single();
+            if (update.error || !update.data) throw new Error(`Matière « ${incoming.evaluationName} » : ${update.error?.message || 'mise à jour impossible'}`);
+            match = update.data as Evaluation;
+            const idx = localEvals.findIndex((e) => e.id === match!.id);
+            if (idx >= 0) localEvals[idx] = match;
           }
         }
 
-        if (match) {
-          if (!match.active) {
-            const reactivation = await admin
-              .from('evaluations')
-              .update({ active: true, source_name: incoming.evaluationName })
-              .eq('id', match.id);
-            if (reactivation.error) throw new Error(`Réactivation de l’évaluation : ${reactivation.error.message}`);
-            match.active = true;
-          }
-          evaluationByIncomingKey.set(incomingKey, match);
-        } else {
+        if (!match) {
           const inserted = await admin.from('evaluations').insert({
             session_id: session.id,
             semester: incoming.semester,
             name: incoming.evaluationName,
             normalized_name: incoming.normalizedName,
+            source_key: incoming.sourceKey,
             source_name: incoming.evaluationName,
             coefficient: 1,
             active: true,
           }).select('*').single();
-          if (inserted.error) throw new Error(`Évaluation : ${inserted.error.message}`);
-          localEvals.push(inserted.data);
-          evaluationByIncomingKey.set(incomingKey, inserted.data);
+          if (inserted.error || !inserted.data) throw new Error(`Matière « ${incoming.evaluationName} » : ${inserted.error?.message || 'création impossible'}`);
+          match = inserted.data as Evaluation;
+          localEvals.push(match);
           evaluationCount += 1;
+        } else if (!match.active) {
+          const reactivation = await admin.from('evaluations').update({ active: true }).eq('id', match.id);
+          if (reactivation.error) throw new Error(`Réactivation de « ${incoming.evaluationName} » : ${reactivation.error.message}`);
+          match = { ...match, active: true };
         }
+
+        evaluationBySourceKey.set(incoming.sourceKey, match);
       }
 
-      // Dernière protection : une seule ligne par clé de conflit. Cela rend aussi l'import
-      // idempotent si le fichier contient accidentellement des doublons de lignes.
-      const gradesPayloadByKey = new Map<string, Record<string, unknown>>();
+      if (evaluationBySourceKey.size !== uniqueIncoming.size) {
+        throw new Error(`Matières (${session.name}) : ${uniqueIncoming.size} colonnes attendues, ${evaluationBySourceKey.size} seulement préparées.`);
+      }
+
+      const gradesPayload: Record<string, unknown>[] = [];
+      const conflictKeys = new Set<string>();
       for (const row of rows) {
         const student = studentByKey.get(row.personKey);
-        if (!student) continue;
+        if (!student) throw new Error(`Étudiant introuvable après import : ${row.personRaw}.`);
         for (const grade of row.grades) {
-          const incomingKey = `${grade.semester}:${grade.normalizedName}`;
-          const evaluation = evaluationByIncomingKey.get(incomingKey);
-          if (!evaluation) continue;
-          gradesPayloadByKey.set(`${student.id}:${evaluation.id}`, {
+          const evaluation = evaluationBySourceKey.get(grade.sourceKey);
+          if (!evaluation) throw new Error(`Matière introuvable après import : ${grade.evaluationName}.`);
+          const conflictKey = `${student.id}:${evaluation.id}`;
+          if (conflictKeys.has(conflictKey)) {
+            throw new Error(`Doublon interne détecté pour ${row.personRaw} / ${grade.evaluationName}.`);
+          }
+          conflictKeys.add(conflictKey);
+          gradesPayload.push({
             student_id: student.id,
             evaluation_id: evaluation.id,
             raw_mention: grade.rawMention,
@@ -284,29 +268,28 @@ export async function POST(request: NextRequest) {
           });
         }
       }
-      const gradesPayload = [...gradesPayloadByKey.values()];
+
+      const expectedForGroup = rows.reduce((sum, row) => sum + row.grades.length, 0);
+      if (gradesPayload.length !== expectedForGroup) {
+        throw new Error(`Import incomplet pour « ${session.name} » : ${expectedForGroup} cellules attendues, ${gradesPayload.length} préparées.`);
+      }
 
       for (const batch of chunks(gradesPayload)) {
         const upsert = await admin.from('grades').upsert(batch, { onConflict: 'student_id,evaluation_id' });
-        if (upsert.error) throw new Error(`Notes (${sessionName}) : ${upsert.error.message}`);
+        if (upsert.error) throw new Error(`Notes (${session.name}) : ${upsert.error.message}`);
         gradeCount += batch.length;
       }
     }
 
-    if (gradeCount !== expectedUniqueCells) {
-      throw new Error(
-        `Import incomplet : ${expectedUniqueCells} cellules distinctes étaient attendues mais ${gradeCount} seulement ont été préparées.`,
-      );
+    if (gradeCount !== expectedCells) {
+      throw new Error(`Import incomplet : ${expectedCells} cellules étaient attendues mais ${gradeCount} seulement ont été enregistrées.`);
     }
 
-    const verification = await admin
-      .from('grades')
-      .select('id', { count: 'exact', head: true })
-      .eq('import_id', importId);
+    const verification = await admin.from('grades').select('id', { count: 'exact', head: true }).eq('import_id', importId);
     if (verification.error) throw new Error(`Vérification de l’import : ${verification.error.message}`);
     const verifiedGradeCount = verification.count || 0;
     if (verifiedGradeCount !== gradeCount) {
-      throw new Error(`Vérification de l’import : ${gradeCount} cellules ont été envoyées mais ${verifiedGradeCount} seulement sont présentes en base.`);
+      throw new Error(`Vérification de l’import : ${gradeCount} cellules ont été envoyées mais ${verifiedGradeCount} seulement sont rattachées à cet import.`);
     }
 
     const historyUpdate = await admin.from('import_history').update({
@@ -324,9 +307,7 @@ export async function POST(request: NextRequest) {
     if (historyUpdate.error) throw new Error(`Historique de l’import : ${historyUpdate.error.message}`);
 
     const debtSync: Array<{ detected: number; inserted: number }> = [];
-    for (const sessionId of touchedSessionIds) {
-      debtSync.push(await syncDebtsForSession(sessionId, auth.user.id));
-    }
+    for (const sessionId of touchedSessionIds) debtSync.push(await syncDebtsForSession(sessionId, auth.user.id));
 
     return NextResponse.json({
       ok: true,
