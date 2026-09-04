@@ -186,6 +186,12 @@ alter default privileges in schema public
 -- Requis par les raccourcis clavier et l'édition manuelle du jury.
 alter type public.jury_opinion add value if not exists 'indetermine';
 
+
+-- -----------------------------------------------------------------------------
+-- 5. Jury : possibilité d'exclure certaines UE du calcul
+-- -----------------------------------------------------------------------------
+alter table public.ues add column if not exists exclude_from_jury boolean not null default false;
+
 -- Contrôle final. Chaque table doit afficher TRUE pour authenticated_select et
 -- service_role_select. service_role_insert doit également être TRUE.
 select

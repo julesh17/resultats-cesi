@@ -67,7 +67,7 @@ export default function ImportsPage() {
       const json = await apiUpload('/api/import/notes', form);
       const created = json.sessions_created ? ` · ${json.sessions_created} session(s) créée(s) automatiquement` : '';
       const missingCode = json.sessions_without_analytic_code ? ` · ${json.sessions_without_analytic_code} code(s) analytique(s) à renseigner` : '';
-      setNotesResult(`Import terminé : ${json.sessions} session(s), ${json.students} étudiant(s), ${json.grades} cellule(s) de note${created}${missingCode}. ${json.debts_created || 0} nouvelle(s) dette(s) détectée(s).`);
+      setNotesResult(`Import terminé : ${json.sessions} session(s), ${json.students} étudiant(s), ${json.evaluation_columns ?? '—'} matière(s), ${json.grades_verified ?? json.grades} cellule(s) enregistrée(s), ${json.filled_results ?? '—'} résultat(s) renseigné(s)${created}${missingCode}. ${json.debts_created || 0} nouvelle(s) dette(s) détectée(s).`);
       await load();
     } catch (e) {
       setNotesResult(`Erreur : ${e instanceof Error ? e.message : 'Import impossible.'}`);
@@ -96,7 +96,7 @@ export default function ImportsPage() {
     <div className="space-y-7">
       <div>
         <h1 className="page-title">Imports</h1>
-        <p className="page-subtitle">Les fichiers Excel sont conservés dans Supabase Storage et leur contenu est synchronisé dans la base.</p>
+        <p className="page-subtitle">Importez ou mettez à jour les notes et les référentiels.</p>
       </div>
 
       <div className="grid xl:grid-cols-2 gap-5">

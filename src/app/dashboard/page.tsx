@@ -6,6 +6,7 @@ import { AlertTriangle, RotateCcw, WalletCards, ArrowRight } from 'lucide-react'
 import StatCard from '@/components/StatCard';
 import Loading from '@/components/Loading';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
+import { fetchAllRows } from '@/lib/supabase/fetchAll';
 import type { CesiSession, Debt, Evaluation, Grade, Student, UE } from '@/lib/types';
 import { buildRetakeMap, computeStudentUEs, makeGradeMap } from '@/lib/results';
 import { displayStudent } from '@/lib/utils';
@@ -27,19 +28,19 @@ export default function DashboardPage() {
       const userId = auth.user?.id;
       const [s, st, ev, gr, ue, de, sub] = await Promise.all([
         supabase.from('sessions').select('*').order('name'),
-        supabase.from('students').select('*').eq('active', true),
-        supabase.from('evaluations').select('*').eq('active', true),
-        supabase.from('grades').select('*'),
-        supabase.from('ues').select('*').eq('active', true),
-        supabase.from('debts').select('*'),
+        fetchAllRows<Student>((from, to) => supabase.from('students').select('*').eq('active', true).order('id').range(from, to)),
+        fetchAllRows<Evaluation>((from, to) => supabase.from('evaluations').select('*').eq('active', true).order('id').range(from, to)),
+        fetchAllRows<Grade>((from, to) => supabase.from('grades').select('*').order('id').range(from, to)),
+        fetchAllRows<UE>((from, to) => supabase.from('ues').select('*').eq('active', true).order('id').range(from, to)),
+        fetchAllRows<Debt>((from, to) => supabase.from('debts').select('*').order('id').range(from, to)),
         userId ? supabase.from('session_subscriptions').select('session_id').eq('user_id', userId) : Promise.resolve({ data: [] as Array<{ session_id: string }> }),
       ]);
       setSessions((s.data || []) as CesiSession[]);
-      setStudents((st.data || []) as Student[]);
-      setEvaluations((ev.data || []) as Evaluation[]);
-      setGrades((gr.data || []) as Grade[]);
-      setUes((ue.data || []) as UE[]);
-      setDebts((de.data || []) as Debt[]);
+      setStudents(st);
+      setEvaluations(ev);
+      setGrades(gr);
+      setUes(ue);
+      setDebts(de);
       setFollowedIds((sub.data || []).map((x) => x.session_id));
       setLoading(false);
     }

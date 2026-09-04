@@ -38,6 +38,18 @@ export async function POST(request: NextRequest) {
 
     const buffer = await file.arrayBuffer();
     const parsedRows = parseNotesWorkbook(buffer);
+    const expectedCells = parsedRows.reduce((sum, row) => sum + row.grades.length, 0);
+    const filledResults = parsedRows.reduce(
+      (sum, row) => sum + row.grades.filter((grade) => Boolean(grade.finalMention || grade.absence)).length,
+      0,
+    );
+    const evaluationColumns = new Set(
+      parsedRows.flatMap((row) => row.grades.map((grade) => `${normalizeText(row.sessionName)}:${grade.semester}:${grade.normalizedName}`)),
+    ).size;
+    const expectedUniqueCells = new Set(
+      parsedRows.flatMap((row) => row.grades.map((grade) =>
+        `${normalizeText(row.sessionName)}:${row.personKey}:${grade.semester}:${grade.normalizedName}`)),
+    ).size;
     const admin = getSupabaseAdmin();
 
     // Un même import peut contenir plusieurs sessions. Les variantes de casse/accents
@@ -172,7 +184,6 @@ export async function POST(request: NextRequest) {
           first_name: row.firstName,
           last_name: row.lastName,
           option_name: row.optionName,
-          active: true,
         });
       }
       const studentPayload = [...studentPayloadByKey.values()];
@@ -282,6 +293,36 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    if (gradeCount !== expectedUniqueCells) {
+      throw new Error(
+        `Import incomplet : ${expectedUniqueCells} cellules distinctes étaient attendues mais ${gradeCount} seulement ont été préparées.`,
+      );
+    }
+
+    const verification = await admin
+      .from('grades')
+      .select('id', { count: 'exact', head: true })
+      .eq('import_id', importId);
+    if (verification.error) throw new Error(`Vérification de l’import : ${verification.error.message}`);
+    const verifiedGradeCount = verification.count || 0;
+    if (verifiedGradeCount !== gradeCount) {
+      throw new Error(`Vérification de l’import : ${gradeCount} cellules ont été envoyées mais ${verifiedGradeCount} seulement sont présentes en base.`);
+    }
+
+    const historyUpdate = await admin.from('import_history').update({
+      metadata: {
+        sessions: sessionNames,
+        sessions_created: sessionsCreated,
+        sessions_without_analytic_code: sessionsWithoutCode,
+        evaluation_columns: evaluationColumns,
+        expected_cells: expectedCells,
+        expected_unique_cells: expectedUniqueCells,
+        filled_results: filledResults,
+        stored_cells: verifiedGradeCount,
+      },
+    }).eq('id', importId);
+    if (historyUpdate.error) throw new Error(`Historique de l’import : ${historyUpdate.error.message}`);
+
     const debtSync: Array<{ detected: number; inserted: number }> = [];
     for (const sessionId of touchedSessionIds) {
       debtSync.push(await syncDebtsForSession(sessionId, auth.user.id));
@@ -295,6 +336,11 @@ export async function POST(request: NextRequest) {
       students: studentCount,
       evaluations_created: evaluationCount,
       grades: gradeCount,
+      grades_verified: verifiedGradeCount,
+      evaluation_columns: evaluationColumns,
+      expected_cells: expectedCells,
+      expected_unique_cells: expectedUniqueCells,
+      filled_results: filledResults,
       debts_detected: debtSync.reduce((sum, item) => sum + item.detected, 0),
       debts_created: debtSync.reduce((sum, item) => sum + item.inserted, 0),
     });

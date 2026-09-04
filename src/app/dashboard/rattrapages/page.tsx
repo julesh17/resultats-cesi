@@ -1,12 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Copy, Download, ListFilter, RefreshCw, RotateCcw } from 'lucide-react';
+import { Copy, Download, ListFilter, RefreshCw, Search } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
+import { fetchAllRows } from '@/lib/supabase/fetchAll';
 import type { CesiSession, Evaluation, Grade, Student, UE } from '@/lib/types';
 import { buildParallelGroups, buildRetakeMap } from '@/lib/results';
-import { cycleYears, displayStudent } from '@/lib/utils';
+import { cycleYears, displayStudent, normalizeText } from '@/lib/utils';
 import SessionSelect from '@/components/SessionSelect';
 import Loading from '@/components/Loading';
 
@@ -30,6 +31,7 @@ export default function RattrapagesPage() {
   const [grades, setGrades] = useState<Grade[]>([]);
   const [ues, setUes] = useState<UE[]>([]);
   const [excludedIds, setExcludedIds] = useState<string[]>([]);
+  const [exclusionSearch, setExclusionSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<'synthese' | 'organisation' | 'mails'>('synthese');
   const [copied, setCopied] = useState('');
@@ -57,8 +59,14 @@ export default function RattrapagesPage() {
     const evalRows = (e.data || []) as Evaluation[];
     let gradeRows: Grade[] = [];
     if (studentRows.length && evalRows.length) {
-      const { data } = await supabase.from('grades').select('*').in('student_id', studentRows.map((x) => x.id)).in('evaluation_id', evalRows.map((x) => x.id));
-      gradeRows = (data || []) as Grade[];
+      gradeRows = await fetchAllRows<Grade>((from, to) =>
+        supabase
+          .from('grades')
+          .select('*')
+          .in('evaluation_id', evalRows.map((x) => x.id))
+          .order('id')
+          .range(from, to),
+      );
     }
     setStudents(studentRows);
     setEvaluations(evalRows);
@@ -77,6 +85,10 @@ export default function RattrapagesPage() {
     () => evaluations.filter((evaluation) => !excludedIds.includes(evaluation.id)),
     [evaluations, excludedIds],
   );
+  const filteredExclusionEvaluations = useMemo(() => {
+    const term = normalizeText(exclusionSearch);
+    return evaluations.filter((evaluation) => !term || normalizeText(evaluation.name).includes(term));
+  }, [evaluations, exclusionSearch]);
   const retakes = useMemo(() => buildRetakeMap(students, includedEvaluations, grades, ues), [students, includedEvaluations, grades, ues]);
   const org = useMemo(() => buildParallelGroups(includedEvaluations, retakes.current), [includedEvaluations, retakes.current]);
   const currentCount = [...retakes.current.values()].reduce((s, x) => s + x.length, 0);
@@ -152,13 +164,15 @@ export default function RattrapagesPage() {
                 <div className="text-sm font-semibold">Exclure des rattrapages</div>
                 <button type="button" className="text-xs text-blue-600 font-medium" onClick={resetExclusions}>Réinitialiser</button>
               </div>
+              <label className="relative block mt-3"><Search size={15} className="absolute left-3 top-3 text-gray-400" /><input className="form-input !pl-9" placeholder="Rechercher une matière…" value={exclusionSearch} onChange={(e) => setExclusionSearch(e.target.value)} /></label>
               <div className="max-h-[360px] overflow-auto mt-2 space-y-1">
-                {evaluations.map((evaluation) => (
+                {filteredExclusionEvaluations.map((evaluation) => (
                   <label key={evaluation.id} className="flex items-start gap-3 rounded-xl px-3 py-2.5 hover:bg-gray-50 cursor-pointer">
                     <input type="checkbox" className="mt-0.5" checked={excludedIds.includes(evaluation.id)} onChange={() => toggleExcluded(evaluation.id)} />
                     <span className="min-w-0 text-sm"><span className="block">{evaluation.name}</span>{isDefaultExcluded(evaluation) ? <span className="text-[11px] muted">Exclue par défaut</span> : null}</span>
                   </label>
                 ))}
+                {!filteredExclusionEvaluations.length ? <div className="px-3 py-6 text-center text-sm muted">Aucune matière trouvée.</div> : null}
               </div>
             </div>
           </details>

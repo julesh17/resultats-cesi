@@ -38,6 +38,7 @@ export interface UE {
   is_enterprise: boolean;
   source_axis: string | null;
   active: boolean;
+  exclude_from_jury: boolean;
 }
 
 export interface Evaluation {

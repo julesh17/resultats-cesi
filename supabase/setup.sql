@@ -136,6 +136,7 @@ create table if not exists public.ues (
   is_enterprise boolean not null default false,
   source_axis text,
   active boolean not null default true,
+  exclude_from_jury boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(session_id, semester, name)
@@ -230,6 +231,7 @@ create table if not exists public.jury_preconisations (
 
 -- Indexes utiles
 alter table public.ues add column if not exists active boolean not null default true;
+alter table public.ues add column if not exists exclude_from_jury boolean not null default false;
 
 create index if not exists idx_students_session on public.students(session_id);
 create index if not exists idx_evaluations_session_semester on public.evaluations(session_id, semester);

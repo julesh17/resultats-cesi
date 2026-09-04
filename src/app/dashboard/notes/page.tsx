@@ -2,15 +2,22 @@
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { Download, Pencil, RefreshCw, Search } from 'lucide-react';
+import { Download, Pencil, RefreshCw, Search, Trash2 } from 'lucide-react';
 import Loading from '@/components/Loading';
 import Modal from '@/components/Modal';
 import SessionSelect from '@/components/SessionSelect';
 import { GradeBadge } from '@/components/Badge';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
+import { fetchAllRows } from '@/lib/supabase/fetchAll';
 import type { CesiSession, Evaluation, Grade, Student, UE } from '@/lib/types';
-import { computeStudentUEs, makeGradeMap, makeInferredBlankAbsenceSet, parseMention } from '@/lib/results';
-import { cycleYears, displayStudent } from '@/lib/utils';
+import {
+  computeStudentUE,
+  computeStudentUEs,
+  makeGradeMap,
+  makeInferredBlankAbsenceSet,
+  parseMention,
+} from '@/lib/results';
+import { cycleYears, displayStudent, normalizeText } from '@/lib/utils';
 
 export default function NotesPage() {
   const [loading, setLoading] = useState(true);
@@ -21,8 +28,10 @@ export default function NotesPage() {
   const [evaluations, setEvaluations] = useState<Evaluation[]>([]);
   const [grades, setGrades] = useState<Grade[]>([]);
   const [ues, setUes] = useState<UE[]>([]);
-  const [view, setView] = useState<'notes' | 'ue'>('notes');
+  const [view, setView] = useState<'notes' | 'ue' | 'synthese'>('notes');
+  const [summaryMode, setSummaryMode] = useState<'ue' | 'evaluation'>('ue');
   const [search, setSearch] = useState('');
+  const [summarySearch, setSummarySearch] = useState('');
   const [selected, setSelected] = useState<{ student: Student; evaluation: Evaluation; grade: Grade | null } | null>(null);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [error, setError] = useState('');
@@ -42,25 +51,41 @@ export default function NotesPage() {
   async function loadData(id = sessionId, sem = semester) {
     if (!id) return;
     setLoading(true);
-    const supabase = getSupabaseBrowser();
-    const [st, ev, ue] = await Promise.all([
-      supabase.from('students').select('*').eq('session_id', id).eq('active', true).order('last_name'),
-      supabase.from('evaluations').select('*').eq('session_id', id).eq('semester', sem).eq('active', true).order('name'),
-      supabase.from('ues').select('*').eq('session_id', id).eq('semester', sem).eq('active', true).order('name'),
-    ]);
-    const studentRows = (st.data || []) as Student[];
-    const evalRows = (ev.data || []) as Evaluation[];
-    const ids = evalRows.map((x) => x.id);
-    let gradeRows: Grade[] = [];
-    if (ids.length) {
-      const gr = await supabase.from('grades').select('*').in('evaluation_id', ids);
-      gradeRows = (gr.data || []) as Grade[];
+    setError('');
+    try {
+      const supabase = getSupabaseBrowser();
+      const [st, ev, ue] = await Promise.all([
+        supabase.from('students').select('*').eq('session_id', id).eq('active', true).order('last_name'),
+        supabase.from('evaluations').select('*').eq('session_id', id).eq('semester', sem).eq('active', true).order('name'),
+        supabase.from('ues').select('*').eq('session_id', id).eq('semester', sem).eq('active', true).order('name'),
+      ]);
+      if (st.error) throw new Error(st.error.message);
+      if (ev.error) throw new Error(ev.error.message);
+      if (ue.error) throw new Error(ue.error.message);
+
+      const studentRows = (st.data || []) as Student[];
+      const evalRows = (ev.data || []) as Evaluation[];
+      const ids = evalRows.map((x) => x.id);
+      let gradeRows: Grade[] = [];
+      if (ids.length) {
+        gradeRows = await fetchAllRows<Grade>((from, to) =>
+          supabase
+            .from('grades')
+            .select('*')
+            .in('evaluation_id', ids)
+            .order('id')
+            .range(from, to),
+        );
+      }
+      setStudents(studentRows);
+      setEvaluations(evalRows);
+      setUes((ue.data || []) as UE[]);
+      setGrades(gradeRows);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Lecture impossible.');
+    } finally {
+      setLoading(false);
     }
-    setStudents(studentRows);
-    setEvaluations(evalRows);
-    setUes((ue.data || []) as UE[]);
-    setGrades(gradeRows);
-    setLoading(false);
   }
 
   useEffect(() => { loadSessions(); }, []);
@@ -68,9 +93,58 @@ export default function NotesPage() {
 
   const currentSession = sessions.find((s) => s.id === sessionId);
   const gradeMap = useMemo(() => makeGradeMap(grades), [grades]);
-  const inferredBlankAbsences = useMemo(() => makeInferredBlankAbsenceSet(students, evaluations, grades), [students, evaluations, grades]);
-  const filteredStudents = useMemo(() => students.filter((s) => displayStudent(s.first_name, s.last_name).toLowerCase().includes(search.toLowerCase())), [search, students]);
+  const inferredBlankAbsences = useMemo(
+    () => makeInferredBlankAbsenceSet(students, evaluations, grades),
+    [students, evaluations, grades],
+  );
+  const filteredStudents = useMemo(
+    () => students.filter((s) => displayStudent(s.first_name, s.last_name).toLowerCase().includes(search.toLowerCase())),
+    [search, students],
+  );
 
+  const ueSummary = useMemo(() => {
+    const term = normalizeText(summarySearch);
+    return ues
+      .filter((ue) => !term || normalizeText(ue.name).includes(term))
+      .map((ue) => {
+        const passed: Student[] = [];
+        const failed: Student[] = [];
+        const pending: Student[] = [];
+        for (const student of filteredStudents) {
+          const result = computeStudentUE(student.id, ue, evaluations, gradeMap, inferredBlankAbsences);
+          if (result.missing) pending.push(student);
+          else if (result.validated) passed.push(student);
+          else failed.push(student);
+        }
+        return { ue, passed, failed, pending };
+      });
+  }, [ues, summarySearch, filteredStudents, evaluations, gradeMap, inferredBlankAbsences]);
+
+  const evaluationSummary = useMemo(() => {
+    const term = normalizeText(summarySearch);
+    return evaluations
+      .filter((evaluation) => !term || normalizeText(evaluation.name).includes(term))
+      .map((evaluation) => {
+        const passed: Student[] = [];
+        const failed: Student[] = [];
+        const pending: Student[] = [];
+        for (const student of filteredStudents) {
+          const key = `${student.id}:${evaluation.id}`;
+          const grade = gradeMap.get(key);
+          const inferred = inferredBlankAbsences.has(key);
+          if (grade?.final_mention === 'A' || grade?.final_mention === 'B') passed.push(student);
+          else if (
+            grade?.final_mention === 'C'
+            || grade?.final_mention === 'D'
+            || grade?.absence === 'AJ'
+            || grade?.absence === 'ANJ'
+            || inferred
+          ) failed.push(student);
+          else pending.push(student);
+        }
+        return { evaluation, passed, failed, pending };
+      });
+  }, [evaluations, summarySearch, filteredStudents, gradeMap, inferredBlankAbsences]);
 
   async function saveGrade(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -82,7 +156,8 @@ export default function NotesPage() {
     const absenceValue = String(form.get('absence') || '');
     const parsed = parseMention(raw);
     const absence = absenceValue === 'AJ' || absenceValue === 'ANJ' ? absenceValue : parsed.absence;
-    const { data: auth } = await getSupabaseBrowser().auth.getUser();
+    const supabase = getSupabaseBrowser();
+    const { data: auth } = await supabase.auth.getUser();
     const payload = {
       student_id: selected.student.id,
       evaluation_id: selected.evaluation.id,
@@ -94,10 +169,10 @@ export default function NotesPage() {
       manual_override: true,
       updated_by: auth.user?.id || null,
     };
-    const { error: upsertError } = await getSupabaseBrowser().from('grades').upsert(payload, { onConflict: 'student_id,evaluation_id' });
+    const { error: upsertError } = await supabase.from('grades').upsert(payload, { onConflict: 'student_id,evaluation_id' });
     if (upsertError) { setError(upsertError.message); return; }
 
-    const { data: session } = await getSupabaseBrowser().auth.getSession();
+    const { data: session } = await supabase.auth.getSession();
     if (session.session) {
       await fetch('/api/debts/sync', {
         method: 'POST',
@@ -108,7 +183,6 @@ export default function NotesPage() {
     setSelected(null);
     await loadData();
   }
-
 
   async function saveStudent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -125,6 +199,22 @@ export default function NotesPage() {
     await loadData();
   }
 
+  async function deleteStudent() {
+    if (!selectedStudent) return;
+    const fullName = displayStudent(selectedStudent.first_name, selectedStudent.last_name);
+    if (!window.confirm(`Supprimer ${fullName} de cette session ?`)) return;
+    setError('');
+    // Retrait logique : l'étudiant disparaît de l'application mais son historique reste
+    // intact. Les réimports ultérieurs du même fichier ne le réactivent pas.
+    const { error: deleteError } = await getSupabaseBrowser()
+      .from('students')
+      .update({ active: false })
+      .eq('id', selectedStudent.id);
+    if (deleteError) { setError(deleteError.message); return; }
+    setSelectedStudent(null);
+    await loadData();
+  }
+
   function exportView() {
     const rows = filteredStudents.map((student) => {
       const row: Record<string, string> = { Prénom: student.first_name, Nom: student.last_name };
@@ -135,18 +225,18 @@ export default function NotesPage() {
       }
       return row;
     });
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), `S${semester} Notes`);
+    const exportWb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(exportWb, XLSX.utils.json_to_sheet(rows), `S${semester} Notes`);
     const ueRows = filteredStudents.flatMap((student) => computeStudentUEs(student.id, ues, evaluations, gradeMap, inferredBlankAbsences).map((r) => ({
       Prénom: student.first_name,
       Nom: student.last_name,
       UE: r.ue.name,
       Mention: r.mention || '',
       'Moyenne pondérée': r.weightedAverage ?? '',
-      Statut: r.missing ? 'Données manquantes' : r.validated ? (r.compensation ? 'Validée par compensation' : 'Validée') : 'Non validée',
+      Statut: r.missing ? 'En cours' : r.validated ? (r.compensation ? 'Validée par compensation' : 'Validée') : 'Non validée',
     })));
-    if (ueRows.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ueRows), `S${semester} UE`);
-    XLSX.writeFile(wb, `resultats_${currentSession?.analytic_code || 'session'}_S${semester}.xlsx`);
+    if (ueRows.length) XLSX.utils.book_append_sheet(exportWb, XLSX.utils.json_to_sheet(ueRows), `S${semester} UE`);
+    XLSX.writeFile(exportWb, `resultats_${currentSession?.analytic_code || 'session'}_S${semester}.xlsx`);
   }
 
   if (loading && !sessions.length) return <Loading />;
@@ -170,14 +260,15 @@ export default function NotesPage() {
         </div>
       </div>
 
-      <div className="flex flex-col md:flex-row gap-3 md:items-center justify-between">
-        <div className="flex bg-white border rounded-xl p-1 w-fit" style={{ borderColor: 'var(--border)' }}>
+      {error ? <div className="rounded-xl bg-red-50 border border-red-200 p-3 text-sm text-red-700">{error}</div> : null}
+
+      <div className="flex flex-col lg:flex-row gap-3 lg:items-center justify-between">
+        <div className="flex bg-white border rounded-xl p-1 w-fit flex-wrap" style={{ borderColor: 'var(--border)' }}>
           <button className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'notes' ? 'bg-gray-100' : 'muted'}`} onClick={() => setView('notes')}>Tableau des notes</button>
-          <button className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'ue' ? 'bg-gray-100' : 'muted'}`} onClick={() => setView('ue')}>Résultats UE</button>
+          <button className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'ue' ? 'bg-gray-100' : 'muted'}`} onClick={() => setView('ue')}>Résultats par étudiant</button>
+          <button className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'synthese' ? 'bg-gray-100' : 'muted'}`} onClick={() => setView('synthese')}>Résultats par UE / matière</button>
         </div>
-        <div className="flex items-center gap-3">
-          <label className="relative min-w-[260px]"><Search size={16} className="absolute left-3 top-3 text-gray-400" /><input className="form-input !pl-9" placeholder="Rechercher un étudiant…" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
-        </div>
+        <label className="relative min-w-[260px]"><Search size={16} className="absolute left-3 top-3 text-gray-400" /><input className="form-input !pl-9" placeholder="Rechercher un étudiant…" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
       </div>
 
       {loading ? <Loading /> : view === 'notes' ? (
@@ -211,7 +302,7 @@ export default function NotesPage() {
           </div>
           {!evaluations.length ? <div className="p-8 text-sm muted text-center">Aucune évaluation active pour S{semester}. Importez le fichier de notes.</div> : null}
         </section>
-      ) : (
+      ) : view === 'ue' ? (
         <div className="space-y-4">
           {!ues.length ? <div className="card p-6 text-sm muted">Aucun référentiel rattaché à S{semester}. Importez le cahier des charges dans l’onglet Imports.</div> : null}
           {filteredStudents.map((student) => {
@@ -221,6 +312,7 @@ export default function NotesPage() {
               <section className="card p-5" key={student.id}>
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                   <div><h3 className="font-semibold">{displayStudent(student.first_name, student.last_name)}</h3><p className="text-xs muted mt-0.5">{notValidated} UE non validée(s)</p></div>
+                  <button type="button" className="btn-secondary !px-3 !py-1.5" onClick={() => setSelectedStudent(student)}><Pencil size={14} /> Modifier l’étudiant</button>
                 </div>
                 <div className="grid lg:grid-cols-2 2xl:grid-cols-3 gap-3">
                   {results.map((r) => (
@@ -229,7 +321,7 @@ export default function NotesPage() {
                         <div className="min-w-0"><div className="font-medium text-sm">{r.ue.name}</div><div className="text-xs muted mt-1">{r.ue.ects ?? '—'} ECTS · {r.ue.is_enterprise ? 'Entreprise' : 'Académique'}</div></div>
                         <span className={`status-badge ${r.mention === 'A' ? 'grade-a' : r.mention === 'B' ? 'grade-b' : r.mention === 'C' ? 'grade-c' : r.mention === 'D' ? 'grade-d' : 'grade-empty'}`}>{r.mention || '—'}</span>
                       </div>
-                      <div className="mt-3 text-xs font-medium">{r.missing ? 'Données manquantes' : r.validated ? (r.compensation ? 'Validée par compensation' : 'Validée') : 'Non validée'} {r.weightedAverage !== null ? `· moyenne ${r.weightedAverage.toFixed(1)}` : ''}</div>
+                      <div className="mt-3 text-xs font-medium">{r.missing ? 'En cours' : r.validated ? (r.compensation ? 'Validée par compensation' : 'Validée') : 'Non validée'} {r.weightedAverage !== null ? `· moyenne ${r.weightedAverage.toFixed(1)}` : ''}</div>
                       <div className="mt-3 border-t pt-2 space-y-1" style={{ borderColor: 'rgba(0,0,0,.08)' }}>
                         {r.elements.map((el) => <div key={el.evaluation.id} className="flex items-center justify-between gap-3 text-xs"><span className="truncate" title={el.evaluation.name}>{el.evaluation.name}</span><div className="flex items-center gap-2 shrink-0"><span className="muted">coef {el.evaluation.coefficient}</span><GradeBadge grade={el.grade} compact /></div></div>)}
                       </div>
@@ -239,6 +331,42 @@ export default function NotesPage() {
               </section>
             );
           })}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="card p-4 flex flex-col md:flex-row gap-3 md:items-center justify-between">
+            <div className="flex bg-gray-50 rounded-xl p-1 w-fit">
+              <button className={`px-4 py-2 rounded-lg text-sm font-medium ${summaryMode === 'ue' ? 'bg-white shadow-sm' : 'muted'}`} onClick={() => setSummaryMode('ue')}>Par UE</button>
+              <button className={`px-4 py-2 rounded-lg text-sm font-medium ${summaryMode === 'evaluation' ? 'bg-white shadow-sm' : 'muted'}`} onClick={() => setSummaryMode('evaluation')}>Par matière</button>
+            </div>
+            <label className="relative min-w-[280px]"><Search size={16} className="absolute left-3 top-3 text-gray-400" /><input className="form-input !pl-9" placeholder={summaryMode === 'ue' ? 'Rechercher une UE…' : 'Rechercher une matière…'} value={summarySearch} onChange={(e) => setSummarySearch(e.target.value)} /></label>
+          </div>
+
+          {summaryMode === 'ue' ? ueSummary.map(({ ue, passed, failed, pending }) => (
+            <section className="card p-5" key={ue.id}>
+              <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+                <div><h3 className="font-semibold">{ue.name}</h3><p className="text-xs muted mt-1">S{ue.semester} · {ue.ects ?? '—'} ECTS</p></div>
+                <div className="flex gap-2"><span className="status-badge grade-a">{passed.length} validée(s)</span><span className="status-badge grade-d">{failed.length} non validée(s)</span>{pending.length ? <span className="status-badge grade-empty">{pending.length} en cours</span> : null}</div>
+              </div>
+              <div className="grid lg:grid-cols-3 gap-3">
+                <div className="rounded-xl bg-emerald-50 border border-emerald-100 p-3"><div className="text-xs font-semibold text-emerald-800 mb-2">UE VALIDÉE</div><div className="flex flex-wrap gap-1.5">{passed.map((s) => <span key={s.id} className="status-badge grade-a">{displayStudent(s.first_name, s.last_name)}</span>)}{!passed.length ? <span className="text-xs muted">Aucun</span> : null}</div></div>
+                <div className="rounded-xl bg-red-50 border border-red-100 p-3"><div className="text-xs font-semibold text-red-800 mb-2">UE NON VALIDÉE</div><div className="flex flex-wrap gap-1.5">{failed.map((s) => <span key={s.id} className="status-badge grade-d">{displayStudent(s.first_name, s.last_name)}</span>)}{!failed.length ? <span className="text-xs muted">Aucun</span> : null}</div></div>
+                <div className="rounded-xl bg-gray-50 border border-gray-200 p-3"><div className="text-xs font-semibold text-gray-600 mb-2">EN COURS</div><div className="flex flex-wrap gap-1.5">{pending.map((s) => <span key={s.id} className="status-badge grade-empty">{displayStudent(s.first_name, s.last_name)}</span>)}{!pending.length ? <span className="text-xs muted">Aucun</span> : null}</div></div>
+              </div>
+            </section>
+          )) : evaluationSummary.map(({ evaluation, passed, failed, pending }) => (
+            <section className="card p-5" key={evaluation.id}>
+              <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+                <div><h3 className="font-semibold">{evaluation.name}</h3><p className="text-xs muted mt-1">S{evaluation.semester}</p></div>
+                <div className="flex gap-2"><span className="status-badge grade-a">{passed.length} réussi(s)</span><span className="status-badge grade-d">{failed.length} non réussi(s)</span>{pending.length ? <span className="status-badge grade-empty">{pending.length} en cours</span> : null}</div>
+              </div>
+              <div className="grid lg:grid-cols-3 gap-3">
+                <div className="rounded-xl bg-emerald-50 border border-emerald-100 p-3"><div className="text-xs font-semibold text-emerald-800 mb-2">RÉUSSI · A/B</div><div className="flex flex-wrap gap-1.5">{passed.map((s) => <span key={s.id} className="status-badge grade-a">{displayStudent(s.first_name, s.last_name)}</span>)}{!passed.length ? <span className="text-xs muted">Aucun</span> : null}</div></div>
+                <div className="rounded-xl bg-red-50 border border-red-100 p-3"><div className="text-xs font-semibold text-red-800 mb-2">NON RÉUSSI · C/D/ABSENCE</div><div className="flex flex-wrap gap-1.5">{failed.map((s) => <span key={s.id} className="status-badge grade-d">{displayStudent(s.first_name, s.last_name)}</span>)}{!failed.length ? <span className="text-xs muted">Aucun</span> : null}</div></div>
+                <div className="rounded-xl bg-gray-50 border border-gray-200 p-3"><div className="text-xs font-semibold text-gray-600 mb-2">EN COURS</div><div className="flex flex-wrap gap-1.5">{pending.map((s) => <span key={s.id} className="status-badge grade-empty">{displayStudent(s.first_name, s.last_name)}</span>)}{!pending.length ? <span className="text-xs muted">Aucun</span> : null}</div></div>
+              </div>
+            </section>
+          ))}
         </div>
       )}
 
@@ -265,7 +393,10 @@ export default function NotesPage() {
             <label className="block"><span className="form-label">Option</span><input name="option_name" className="form-input" defaultValue={selectedStudent.option_name || ''} /></label>
             <label className="block"><span className="form-label">Infos complémentaires · facultatif</span><textarea name="supplementary_info" className="form-input min-h-[120px]" defaultValue={selectedStudent.supplementary_info || ''} /></label>
             {error ? <div className="rounded-xl bg-red-50 border border-red-200 p-3 text-sm text-red-700">{error}</div> : null}
-            <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={() => setSelectedStudent(null)}>Annuler</button><button className="btn-primary">Enregistrer</button></div>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-2">
+              <button type="button" className="btn-danger" onClick={deleteStudent}><Trash2 size={15} /> Supprimer l’étudiant</button>
+              <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={() => setSelectedStudent(null)}>Annuler</button><button className="btn-primary">Enregistrer</button></div>
+            </div>
           </form>
         ) : null}
       </Modal>

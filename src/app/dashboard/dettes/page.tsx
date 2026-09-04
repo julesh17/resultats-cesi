@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, RefreshCw, RotateCcw } from 'lucide-react';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
+import { fetchAllRows } from '@/lib/supabase/fetchAll';
 import type { CesiSession, Debt } from '@/lib/types';
 import { displayStudent } from '@/lib/utils';
 import SessionSelect from '@/components/SessionSelect';
@@ -30,27 +31,40 @@ export default function DettesPage() {
   const loadDebts = useCallback(async () => {
     if (!sessionId) { setLoading(false); return; }
     setLoading(true);
-    const { data: studentRows } = await supabase.from('students').select('id').eq('session_id', sessionId);
+    const { data: studentRows } = await supabase.from('students').select('id').eq('session_id', sessionId).eq('active', true);
     const ids = ((studentRows || []) as Array<{ id: string }>).map((s) => s.id);
     if (!ids.length) { setDebts([]); setLoading(false); return; }
-    let query = supabase.from('debts').select('*,students(id,first_name,last_name,session_id),ues(id,name,semester)').in('student_id', ids).order('created_at', { ascending: false });
-    if (status !== 'all') query = query.eq('status', status);
-    const { data } = await query;
-    setDebts((data || []) as unknown as Debt[]);
+    const rows = await fetchAllRows<Debt>((from, to) => {
+      let query = supabase
+        .from('debts')
+        .select('*,students(id,first_name,last_name,session_id),ues(id,name,semester)')
+        .in('student_id', ids)
+        .order('created_at', { ascending: false });
+      if (status !== 'all') query = query.eq('status', status);
+      return query.range(from, to) as unknown as PromiseLike<{ data: Debt[] | null; error: { message: string } | null }>;
+    });
+    setDebts(rows);
     setLoading(false);
   }, [supabase, sessionId, status]);
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
   useEffect(() => { loadDebts(); }, [loadDebts]);
-
-  async function syncDebts() {
+  useEffect(() => {
     if (!sessionId) return;
-    setSyncing(true); setMessage('');
+    void syncDebts(true);
+    // Synchronisation automatique à l'ouverture d'une session : les dettes calculées
+    // avec les notes déjà présentes sont immédiatement matérialisées.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  async function syncDebts(silent = false) {
+    if (!sessionId) return;
+    setSyncing(true); if (!silent) setMessage('');
     const { data: auth } = await supabase.auth.getSession();
     const res = await fetch('/api/debts/sync', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${auth.session?.access_token || ''}` }, body: JSON.stringify({ session_id: sessionId }) });
     const json = await res.json();
-    if (!res.ok) setMessage(json.error || 'Synchronisation impossible.');
-    else setMessage(`${json.detected || 0} dette(s) détectée(s), ${json.inserted || 0} nouvelle(s) créée(s).`);
+    if (!res.ok) { if (!silent) setMessage(json.error || 'Synchronisation impossible.'); }
+    else if (!silent) setMessage(`${json.detected || 0} dette(s) détectée(s), ${json.inserted || 0} nouvelle(s) créée(s).`);
     setSyncing(false); await loadDebts();
   }
 
@@ -74,7 +88,7 @@ export default function DettesPage() {
   return <div className="space-y-6">
     <div className="flex flex-col xl:flex-row xl:items-end justify-between gap-4">
       <div><h1 className="page-title">Dettes</h1><p className="page-subtitle">Une UE encore non validée après rattrapage devient une dette. Son statut reste modifiable manuellement.</p></div>
-      <div className="flex flex-wrap items-end gap-3"><SessionSelect sessions={sessions} value={sessionId} onChange={setSessionId} /><label className="block min-w-[160px]"><span className="form-label">Statut</span><select className="form-select" value={status} onChange={(e) => setStatus(e.target.value as typeof status)}><option value="all">Toutes</option><option value="pending">Non validées</option><option value="validated">Validées / ex-dettes</option></select></label><button className="btn-primary" disabled={syncing || !sessionId} onClick={syncDebts}><RefreshCw size={16} className={syncing ? 'animate-spin' : ''} /> Synchroniser</button></div>
+      <div className="flex flex-wrap items-end gap-3"><SessionSelect sessions={sessions} value={sessionId} onChange={setSessionId} /><label className="block min-w-[160px]"><span className="form-label">Statut</span><select className="form-select" value={status} onChange={(e) => setStatus(e.target.value as typeof status)}><option value="all">Toutes</option><option value="pending">Non validées</option><option value="validated">Validées / ex-dettes</option></select></label><button className="btn-primary" disabled={syncing || !sessionId} onClick={() => syncDebts(false)}><RefreshCw size={16} className={syncing ? 'animate-spin' : ''} /> Synchroniser</button></div>
     </div>
     {message ? <div className="card p-4 text-sm">{message}</div> : null}
     <div className="grid sm:grid-cols-2 gap-3"><div className="card p-5"><div className="text-2xl font-semibold text-red-600">{pending}</div><div className="text-sm muted mt-1">dette(s) non validée(s) dans la vue</div></div><div className="card p-5"><div className="text-2xl font-semibold text-emerald-600">{validated}</div><div className="text-sm muted mt-1">ex-dette(s) validée(s) dans la vue</div></div></div>

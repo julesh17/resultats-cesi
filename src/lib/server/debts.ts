@@ -1,29 +1,49 @@
 import 'server-only';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
+import { fetchAllRows } from '@/lib/supabase/fetchAll';
 import { computeStudentUE, gradeHadResit, gradeNeedsRetake, makeGradeMap, makeInferredBlankAbsenceSet } from '@/lib/results';
 import { semesterToYear } from '@/lib/utils';
 import type { Evaluation, Grade, Student, UE } from '@/lib/types';
 
 export async function syncDebtsForSession(sessionId: string, userId?: string) {
   const admin = getSupabaseAdmin();
-  const [{ data: students, error: sError }, { data: ues, error: uError }, { data: evaluations, error: eError }] = await Promise.all([
-    admin.from('students').select('*').eq('session_id', sessionId).eq('active', true),
-    admin.from('ues').select('*').eq('session_id', sessionId).eq('active', true),
-    admin.from('evaluations').select('*').eq('session_id', sessionId).eq('active', true),
+  const [typedStudents, typedUes, typedEvaluations] = await Promise.all([
+    fetchAllRows<Student>((from, to) => admin
+      .from('students')
+      .select('*')
+      .eq('session_id', sessionId)
+      .eq('active', true)
+      .order('id')
+      .range(from, to)),
+    fetchAllRows<UE>((from, to) => admin
+      .from('ues')
+      .select('*')
+      .eq('session_id', sessionId)
+      .eq('active', true)
+      .order('id')
+      .range(from, to)),
+    fetchAllRows<Evaluation>((from, to) => admin
+      .from('evaluations')
+      .select('*')
+      .eq('session_id', sessionId)
+      .eq('active', true)
+      .order('id')
+      .range(from, to)),
   ]);
-  if (sError || uError || eError) throw new Error(sError?.message || uError?.message || eError?.message || 'Erreur de lecture.');
 
-  const evalIds = (evaluations || []).map((e) => e.id);
+  const evalIds = typedEvaluations.map((evaluation) => evaluation.id);
   let grades: Grade[] = [];
   if (evalIds.length) {
-    const { data, error } = await admin.from('grades').select('*').in('evaluation_id', evalIds);
-    if (error) throw new Error(error.message);
-    grades = (data || []) as Grade[];
+    grades = await fetchAllRows<Grade>((from, to) =>
+      admin
+        .from('grades')
+        .select('*')
+        .in('evaluation_id', evalIds)
+        .order('id')
+        .range(from, to),
+    );
   }
 
-  const typedStudents = (students || []) as Student[];
-  const typedUes = (ues || []) as UE[];
-  const typedEvaluations = (evaluations || []) as Evaluation[];
   const gradeMap = makeGradeMap(grades);
   const inferredBlankAbsences = makeInferredBlankAbsenceSet(typedStudents, typedEvaluations, grades);
   const candidates: Array<{
@@ -63,11 +83,16 @@ export async function syncDebtsForSession(sessionId: string, userId?: string) {
   if (!candidates.length) return { detected: 0, inserted: 0 };
 
   const studentIds = typedStudents.map((s) => s.id);
-  let existingRows: Array<{ student_id: string; ue_id: string; origin_semester: number }> = [];
+  let existingRows: Array<{ id: string; student_id: string; ue_id: string; origin_semester: number; status: string }> = [];
   if (studentIds.length) {
-    const existing = await admin.from('debts').select('student_id,ue_id,origin_semester').in('student_id', studentIds);
-    if (existing.error) throw new Error(existing.error.message);
-    existingRows = existing.data || [];
+    existingRows = await fetchAllRows<{ id: string; student_id: string; ue_id: string; origin_semester: number; status: string }>((from, to) =>
+      admin
+        .from('debts')
+        .select('id,student_id,ue_id,origin_semester,status')
+        .in('student_id', studentIds)
+        .order('id')
+        .range(from, to),
+    );
   }
 
   const existingKeys = new Set(existingRows.map((d) => `${d.student_id}:${d.ue_id}:${d.origin_semester}`));

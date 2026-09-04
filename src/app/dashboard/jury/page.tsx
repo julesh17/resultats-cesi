@@ -1,12 +1,13 @@
 'use client';
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, Filter, Pencil, RefreshCw } from 'lucide-react';
+import { Download, Filter, ListFilter, Pencil, RefreshCw, Search } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
+import { fetchAllRows } from '@/lib/supabase/fetchAll';
 import type { CesiSession, Debt, Evaluation, Grade, JuryComputed, JuryOpinion, JuryRecord, Preconisation, Student, UE } from '@/lib/types';
 import { computeJury, defaultPreconisations, opinionLabel } from '@/lib/results';
-import { cycleYears, displayStudent, yearToSemesters } from '@/lib/utils';
+import { cycleYears, displayStudent, normalizeText, yearToSemesters } from '@/lib/utils';
 import SessionSelect from '@/components/SessionSelect';
 import Loading from '@/components/Loading';
 import Modal from '@/components/Modal';
@@ -40,6 +41,7 @@ export default function JuryPage() {
   const [saving, setSaving] = useState(false);
   const [activeRowId, setActiveRowId] = useState('');
   const [error, setError] = useState('');
+  const [ueExclusionSearch, setUeExclusionSearch] = useState('');
 
   const loadSessions = useCallback(async () => {
     const { data } = await supabase.from('sessions').select('*').order('name');
@@ -54,53 +56,143 @@ export default function JuryPage() {
   const loadData = useCallback(async () => {
     if (!sessionId) { setLoading(false); return; }
     setLoading(true);
-    const session = sessions.find((s) => s.id === sessionId);
-    if (session && !cycleYears(session.cycle).some((y) => y.label === yearLabel)) {
-      setYearLabel(cycleYears(session.cycle)[0].label);
+    setError('');
+    try {
+      const session = sessions.find((item) => item.id === sessionId);
+      let effectiveYearLabel = yearLabel;
+      if (session && !cycleYears(session.cycle).some((year) => year.label === yearLabel)) {
+        effectiveYearLabel = cycleYears(session.cycle)[0].label;
+        setYearLabel(effectiveYearLabel);
+      }
+      const semesters = yearToSemesters(effectiveYearLabel);
+
+      // Les dettes sont recalculées avant le jury afin que le tableau utilise toujours
+      // l'état académique actuel, y compris après un nouvel import de notes.
+      const { data: authSession } = await supabase.auth.getSession();
+      if (authSession.session) {
+        await fetch('/api/debts/sync', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            Authorization: `Bearer ${authSession.session.access_token}`,
+          },
+          body: JSON.stringify({ session_id: sessionId }),
+        });
+      }
+
+      const [studentRows, evalRows, ueRows, precoRows] = await Promise.all([
+        fetchAllRows<Student>((from, to) => supabase
+          .from('students')
+          .select('*')
+          .eq('session_id', sessionId)
+          .eq('active', true)
+          .order('last_name')
+          .order('first_name')
+          .order('id')
+          .range(from, to)),
+        fetchAllRows<Evaluation>((from, to) => supabase
+          .from('evaluations')
+          .select('*')
+          .eq('session_id', sessionId)
+          .in('semester', semesters)
+          .eq('active', true)
+          .order('semester')
+          .order('name')
+          .order('id')
+          .range(from, to)),
+        fetchAllRows<UE>((from, to) => supabase
+          .from('ues')
+          .select('*')
+          .eq('session_id', sessionId)
+          .in('semester', semesters)
+          .eq('active', true)
+          .order('semester')
+          .order('name')
+          .order('id')
+          .range(from, to)),
+        fetchAllRows<Preconisation>((from, to) => supabase
+          .from('preconisations')
+          .select('*')
+          .order('id')
+          .range(from, to)),
+      ]);
+
+      const evaluationIds = evalRows.map((evaluation) => evaluation.id);
+      let gradeRows: Grade[] = [];
+      if (evaluationIds.length) {
+        gradeRows = await fetchAllRows<Grade>((from, to) => supabase
+          .from('grades')
+          .select('*')
+          .in('evaluation_id', evaluationIds)
+          .order('id')
+          .range(from, to));
+      }
+
+      const studentIds = studentRows.map((student) => student.id);
+      let debtRows: Debt[] = [];
+      let recordRows: JuryRecord[] = [];
+      if (studentIds.length) {
+        [debtRows, recordRows] = await Promise.all([
+          fetchAllRows<Debt>((from, to) => supabase
+            .from('debts')
+            .select('*')
+            .in('student_id', studentIds)
+            .order('id')
+            .range(from, to)),
+          fetchAllRows<JuryRecord>((from, to) => supabase
+            .from('jury_records')
+            .select('*')
+            .in('student_id', studentIds)
+            .order('id')
+            .range(from, to)),
+        ]);
+      }
+
+      const recordIds = recordRows.map((record) => record.id);
+      let linkRows: Array<{ jury_record_id: string; preconisation_id: number }> = [];
+      if (recordIds.length) {
+        linkRows = await fetchAllRows<{ jury_record_id: string; preconisation_id: number }>((from, to) => supabase
+          .from('jury_preconisations')
+          .select('jury_record_id,preconisation_id')
+          .in('jury_record_id', recordIds)
+          .order('jury_record_id')
+          .order('preconisation_id')
+          .range(from, to));
+      }
+
+      setStudents(studentRows);
+      setEvaluations(evalRows);
+      setUes(ueRows);
+      setGrades(gradeRows);
+      setDebts(debtRows);
+      setRecords(recordRows);
+      setPreconisations(precoRows);
+      setLinks(linkRows);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Lecture impossible.');
+    } finally {
+      setLoading(false);
     }
-    const semesters = yearToSemesters(yearLabel);
-    const [st, ev, ue, db, jr, pc] = await Promise.all([
-      supabase.from('students').select('*').eq('session_id', sessionId).eq('active', true).order('last_name'),
-      supabase.from('evaluations').select('*').eq('session_id', sessionId).in('semester', semesters).eq('active', true),
-      supabase.from('ues').select('*').eq('session_id', sessionId).in('semester', semesters).eq('active', true),
-      supabase.from('debts').select('*'),
-      supabase.from('jury_records').select('*'),
-      supabase.from('preconisations').select('*').order('id'),
-    ]);
-    const studentRows = (st.data || []) as Student[];
-    const evalRows = (ev.data || []) as Evaluation[];
-    let gradeRows: Grade[] = [];
-    if (studentRows.length && evalRows.length) {
-      const { data } = await supabase.from('grades').select('*').in('student_id', studentRows.map((s) => s.id)).in('evaluation_id', evalRows.map((e) => e.id));
-      gradeRows = (data || []) as Grade[];
-    }
-    const studentIds = new Set(studentRows.map((s) => s.id));
-    const debtRows = ((db.data || []) as Debt[]).filter((d) => studentIds.has(d.student_id));
-    const recordRows = ((jr.data || []) as JuryRecord[]).filter((r) => studentIds.has(r.student_id));
-    const recordIds = recordRows.map((r) => r.id);
-    let linkRows: Array<{ jury_record_id: string; preconisation_id: number }> = [];
-    if (recordIds.length) {
-      const { data } = await supabase.from('jury_preconisations').select('jury_record_id,preconisation_id').in('jury_record_id', recordIds);
-      linkRows = (data || []) as typeof linkRows;
-    }
-    setStudents(studentRows);
-    setEvaluations(evalRows);
-    setUes((ue.data || []) as UE[]);
-    setGrades(gradeRows);
-    setDebts(debtRows);
-    setRecords(recordRows);
-    setPreconisations((pc.data || []) as Preconisation[]);
-    setLinks(linkRows);
-    setLoading(false);
   }, [supabase, sessionId, yearLabel, sessions]);
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
   useEffect(() => { if (sessions.length) loadData(); }, [loadData, sessions.length]);
 
   const currentSession = sessions.find((s) => s.id === sessionId);
+  const juryUes = useMemo(() => ues.filter((ue) => !ue.exclude_from_jury), [ues]);
+  const juryUeIds = useMemo(() => new Set(juryUes.map((ue) => ue.id)), [juryUes]);
+  const juryEvaluations = useMemo(
+    () => evaluations.filter((evaluation) => !evaluation.ue_id || juryUeIds.has(evaluation.ue_id)),
+    [evaluations, juryUeIds],
+  );
+  const filteredUesForExclusion = useMemo(() => {
+    const term = normalizeText(ueExclusionSearch);
+    return ues.filter((ue) => !term || normalizeText(ue.name).includes(term));
+  }, [ues, ueExclusionSearch]);
+
   const rows = useMemo<JuryRow[]>(() => students.map((student) => {
     const record = records.find((r) => r.student_id === student.id && r.year_label === yearLabel) || null;
-    const computed = computeJury(student, yearLabel, evaluations, ues, grades, debts, record, students);
+    const computed = computeJury(student, yearLabel, juryEvaluations, juryUes, grades, debts, record, students);
     const yearNumber = Number(yearLabel.slice(1));
     const hasPreviousJury = records.some((r) => r.student_id === student.id && Number(r.year_label.slice(1)) < yearNumber);
     const selectedPrecos = record ? links.filter((l) => l.jury_record_id === record.id).map((l) => l.preconisation_id) : [];
@@ -112,7 +204,7 @@ export default function JuryPage() {
       hasPreviousJury,
       selectedPrecos,
     };
-  }), [students, records, yearLabel, evaluations, ues, grades, debts, links]);
+  }), [students, records, yearLabel, juryEvaluations, juryUes, grades, debts, links]);
 
   const shownRows = rows.filter((r) => !complexOnly
     || r.computed.totalUeNotValidated > 0
@@ -153,7 +245,7 @@ export default function JuryPage() {
     await supabase.from('jury_preconisations').delete().eq('jury_record_id', rec.data.id);
     if (selected.length) {
       const updatedRecord = { ...rec.data, major_behavior_issue: major, previous_recommendations_respected: previousRespected } as JuryRecord;
-      const autoComputed = computeJury(editing.student, yearLabel, evaluations, ues, grades, debts, updatedRecord, students);
+      const autoComputed = computeJury(editing.student, yearLabel, juryEvaluations, juryUes, grades, debts, updatedRecord, students);
       const autoIds = new Set(defaultPreconisations(autoComputed, updatedRecord, editing.hasPreviousJury));
       const ins = await supabase.from('jury_preconisations').insert(selected.map((id) => ({ jury_record_id: rec.data.id, preconisation_id: id, is_auto: autoIds.has(id) })));
       if (ins.error) { setError(ins.error.message); setSaving(false); return; }
@@ -197,8 +289,29 @@ export default function JuryPage() {
     void setQuickOpinion(row, map[key]);
   }
 
+  async function toggleUeJury(ue: UE) {
+    const { error: updateError } = await supabase
+      .from('ues')
+      .update({ exclude_from_jury: !ue.exclude_from_jury })
+      .eq('id', ue.id);
+    if (updateError) { setError(updateError.message); return; }
+    setUes((current) => current.map((item) => item.id === ue.id ? { ...item, exclude_from_jury: !item.exclude_from_jury } : item));
+  }
+
+  async function includeAllUes() {
+    if (!sessionId) return;
+    const semesters = yearToSemesters(yearLabel);
+    const { error: updateError } = await supabase
+      .from('ues')
+      .update({ exclude_from_jury: false })
+      .eq('session_id', sessionId)
+      .in('semester', semesters);
+    if (updateError) { setError(updateError.message); return; }
+    setUes((current) => current.map((ue) => ({ ...ue, exclude_from_jury: false })));
+  }
+
   function exportJury() {
-    const precoById = new Map(preconisations.map((p) => [p.id, p]));
+    const precoById = new Map<number, Preconisation>(preconisations.map((p) => [p.id, p]));
     const exportRows = rows.map((row) => {
       const ids = row.selectedPrecos.length ? row.selectedPrecos : defaultPreconisations(row.computed, row.record, row.hasPreviousJury);
       const semesters = yearToSemesters(yearLabel);
@@ -244,10 +357,26 @@ export default function JuryPage() {
       <div className="flex flex-wrap items-end gap-3">
         <SessionSelect sessions={sessions} value={sessionId} onChange={(id) => { setSessionId(id); const s = sessions.find((x) => x.id === id); if (s) setYearLabel(cycleYears(s.cycle)[0].label); }} />
         <label className="block min-w-[115px]"><span className="form-label">Année</span><select className="form-select" value={yearLabel} onChange={(e) => setYearLabel(e.target.value)}>{currentSession ? cycleYears(currentSession.cycle).map((y) => <option key={y.label} value={y.label}>{y.label}</option>) : null}</select></label>
+        <details className="relative">
+          <summary className="btn-secondary list-none cursor-pointer"><ListFilter size={16} /> UE exclues {ues.filter((ue) => ue.exclude_from_jury).length ? <span className="status-badge grade-empty !py-0">{ues.filter((ue) => ue.exclude_from_jury).length}</span> : null}</summary>
+          <div className="absolute right-0 z-40 mt-2 w-[min(92vw,480px)] card p-3 shadow-xl">
+            <div className="flex items-center justify-between gap-3 px-1 pb-2 border-b" style={{ borderColor: 'var(--border)' }}>
+              <div className="text-sm font-semibold">UE prises en compte par le jury</div>
+              <button type="button" className="text-xs text-blue-600 font-medium" onClick={includeAllUes}>Tout réinclure</button>
+            </div>
+            <label className="relative block mt-3"><Search size={15} className="absolute left-3 top-3 text-gray-400" /><input className="form-input !pl-9" placeholder="Rechercher une UE…" value={ueExclusionSearch} onChange={(e) => setUeExclusionSearch(e.target.value)} /></label>
+            <div className="max-h-[360px] overflow-auto mt-2 space-y-1">
+              {filteredUesForExclusion.map((ue) => <label key={ue.id} className="flex items-start gap-3 rounded-xl px-3 py-2.5 hover:bg-gray-50 cursor-pointer"><input type="checkbox" className="mt-0.5" checked={!ue.exclude_from_jury} onChange={() => toggleUeJury(ue)} /><span className="min-w-0 text-sm"><span className="block">{ue.name}</span><span className="text-[11px] muted">S{ue.semester}</span></span></label>)}
+              {!filteredUesForExclusion.length ? <div className="px-3 py-6 text-center text-sm muted">Aucune UE trouvée.</div> : null}
+            </div>
+          </div>
+        </details>
         <button className="btn-secondary" onClick={() => loadData()}><RefreshCw size={16} /> Actualiser</button>
         <button className="btn-primary" onClick={exportJury} disabled={!rows.length}><Download size={16} /> Export Excel</button>
       </div>
     </div>
+
+    {error ? <div className="rounded-xl bg-red-50 border border-red-200 p-3 text-sm text-red-700">{error}</div> : null}
 
     <div className="card p-4 flex flex-wrap items-center justify-between gap-4">
       <label className="inline-flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={complexOnly} onChange={(e) => setComplexOnly(e.target.checked)} className="rounded" /><Filter size={15} /> N’afficher que les cas complexes</label>
@@ -255,6 +384,7 @@ export default function JuryPage() {
     </div>
 
     {!ues.length && !loading ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">Aucun référentiel trouvé pour {yearLabel}.</div> : null}
+    {ues.length > 0 && !juryUes.length && !loading ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">Toutes les UE de {yearLabel} sont exclues du calcul du jury.</div> : null}
 
     {loading ? <Loading /> : <section className="card overflow-hidden"><div className="overflow-auto"><table className="min-w-full border-collapse"><thead><tr><th className="table-header">Étudiant</th><th className="table-header">S{semesters[0]}</th><th className="table-header">S{semesters[1]}</th><th className="table-header">ECTS acquis</th><th className="table-header">UE finalisées non validées</th><th className="table-header">Abs.</th><th className="table-header">Dettes</th><th className="table-header">Avis</th><th className="table-header">Préconisations</th><th className="table-header"></th></tr></thead><tbody>{shownRows.map((r) => {
       const defaultIds = r.selectedPrecos.length ? r.selectedPrecos : defaultPreconisations(r.computed, r.record, r.hasPreviousJury);
