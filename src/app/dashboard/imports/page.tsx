@@ -83,7 +83,7 @@ export default function ImportsPage() {
       form.append('file', rnFile);
       form.append('session_id', sessionId);
       const json = await apiUpload('/api/import/referentiel', form);
-      setRnResult(`Référentiel enregistré : ${json.ues} UE, ${json.evaluations_matched} évaluation(s) rapprochée(s), ${json.evaluations_created} créée(s). ${json.debts_created || 0} nouvelle(s) dette(s).`);
+      setRnResult(`Référentiel enregistré : ${json.ues} UE et ${json.evaluations_total || (json.evaluations_matched + json.evaluations_created)} élément(s) évaluables. ${json.debts_created || 0} nouvelle(s) dette(s).`);
       await load();
     } catch (e) {
       setRnResult(`Erreur : ${e instanceof Error ? e.message : 'Import impossible.'}`);
@@ -109,7 +109,7 @@ export default function ImportsPage() {
               <input className="form-input file:mr-3 file:border-0 file:bg-transparent file:font-medium" type="file" accept=".xlsx" onChange={(e) => setNotesFile(e.target.files?.[0] || null)} required />
             </label>
             <div className="rounded-xl bg-blue-50 border border-blue-100 p-3 text-xs text-blue-800">
-              Une réimportation met à jour les mêmes étudiants, évaluations et notes. Si le fichier contient une colonne <strong>Code analytique</strong>, elle est utilisée lors de la création automatique ; sinon le code pourra être renseigné ensuite dans <strong>Sessions</strong>. Les cellules vides redeviennent des notes non saisies.
+              Une réimportation met à jour les mêmes étudiants, évaluations et notes. Si le fichier contient une colonne <strong>Code analytique</strong>, elle est utilisée lors de la création automatique ; sinon le code pourra être renseigné ensuite dans <strong>Sessions</strong>.
             </div>
             <button className="btn-primary" disabled={!notesFile || busy !== null}><UploadCloud size={16} /> {busy === 'notes' ? 'Import en cours…' : 'Importer les notes'}</button>
             {notesResult ? <div className={`rounded-xl p-3 text-sm border ${notesResult.startsWith('Erreur') ? 'bg-red-50 border-red-200 text-red-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>{notesResult}</div> : null}
@@ -125,9 +125,6 @@ export default function ImportsPage() {
               <span className="form-label">Référentiel .xlsx</span>
               <input className="form-input file:mr-3 file:border-0 file:bg-transparent file:font-medium" type="file" accept=".xlsx" onChange={(e) => setRnFile(e.target.files?.[0] || null)} required />
             </label>
-            <div className="rounded-xl bg-gray-50 border border-gray-200 p-3 text-xs muted">
-              Le rapprochement entre les libellés du fichier de notes et ceux du référentiel reprend la logique de l’ancienne application : correspondance exacte, inclusion de libellé, puis comparaison par mots significatifs.
-            </div>
             <button className="btn-primary" disabled={!rnFile || !sessionId || busy !== null}><UploadCloud size={16} /> {busy === 'rn' ? 'Import en cours…' : 'Mettre à jour le référentiel'}</button>
             {rnResult ? <div className={`rounded-xl p-3 text-sm border ${rnResult.startsWith('Erreur') ? 'bg-red-50 border-red-200 text-red-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>{rnResult}</div> : null}
           </form>

@@ -14,8 +14,9 @@ DO $$ BEGIN
   create type public.debt_status as enum ('pending', 'validated');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
-  create type public.jury_opinion as enum ('favorable', 'reserve', 'defavorable');
+  create type public.jury_opinion as enum ('favorable', 'reserve', 'defavorable', 'indetermine');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+alter type public.jury_opinion add value if not exists 'indetermine';
 DO $$ BEGIN
   create type public.import_kind as enum ('notes', 'referentiel');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

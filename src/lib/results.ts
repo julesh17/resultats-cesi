@@ -26,14 +26,52 @@ export function parseMention(rawValue: unknown) {
   return { raw, initial, final, absence: null as 'AJ' | 'ANJ' | null, hadResit: raw.includes('/') };
 }
 
-export function gradeValue(grade: Grade | null | undefined): number | null {
+function hasResult(grade: Grade | null | undefined) {
+  return Boolean(grade?.final_mention || grade?.absence);
+}
+
+/**
+ * Une cellule vide est interprétée comme une absence seulement lorsque tous les
+ * autres étudiants actifs ont déjà un résultat sur cette même évaluation.
+ * Ainsi, une évaluation future ou encore en cours ne transforme pas les blancs
+ * en absences.
+ */
+export function makeInferredBlankAbsenceSet(
+  students: Student[],
+  evaluations: Evaluation[],
+  grades: Grade[],
+) {
+  const activeStudents = students.filter((student) => student.active !== false);
+  const gradeMap = makeGradeMap(grades);
+  const inferred = new Set<string>();
+
+  if (activeStudents.length < 2) return inferred;
+
+  for (const evaluation of evaluations.filter((item) => item.active)) {
+    for (const student of activeStudents) {
+      const ownKey = `${student.id}:${evaluation.id}`;
+      if (hasResult(gradeMap.get(ownKey))) continue;
+
+      const allOthersHaveResult = activeStudents.every((other) => {
+        if (other.id === student.id) return true;
+        return hasResult(gradeMap.get(`${other.id}:${evaluation.id}`));
+      });
+      if (allOthersHaveResult) inferred.add(ownKey);
+    }
+  }
+  return inferred;
+}
+
+export function gradeValue(grade: Grade | null | undefined, inferredBlankAbsence = false): number | null {
+  if (inferredBlankAbsence) return GRADE_VALUES.D;
   if (!grade) return null;
   if (grade.final_mention && GRADE_VALUES[grade.final_mention] !== undefined) return GRADE_VALUES[grade.final_mention];
   if (grade.absence === 'AJ' || grade.absence === 'ANJ') return GRADE_VALUES.D;
   return null;
 }
 
-export function gradeNeedsRetake(grade: Grade | null | undefined) {
+export function gradeNeedsRetake(grade: Grade | null | undefined, inferredBlankAbsence = false) {
+  if (inferredBlankAbsence) return true;
   if (!grade) return false;
   if (grade.absence === 'AJ' || grade.absence === 'ANJ') return true;
   return grade.final_mention === 'C' || grade.final_mention === 'D';
@@ -44,16 +82,16 @@ export function gradeHadResit(grade: Grade | null | undefined) {
 }
 
 export function gradeTooltip(grade: Grade | null | undefined): string {
-  if (!grade) return 'Note non saisie';
+  if (!grade) return '';
   const lines: string[] = [];
   if (grade.numeric_note_text) lines.push(`Note numérique : ${grade.numeric_note_text}`);
   if (grade.raw_mention?.includes('/')) lines.push(`Rattrapage : ${grade.raw_mention}`);
   if (grade.absence) lines.push(`Absence : ${grade.absence}`);
-  return lines.length ? lines.join(' · ') : 'Aucune note numérique disponible';
+  return lines.join(' · ');
 }
 
 export function makeGradeMap(grades: Grade[]) {
-  return new Map(grades.map((g) => [`${g.student_id}:${g.evaluation_id}`, g] as const));
+  return new Map<string, Grade>(grades.map((g) => [`${g.student_id}:${g.evaluation_id}`, g]));
 }
 
 export function computeStudentUE(
@@ -61,12 +99,15 @@ export function computeStudentUE(
   ue: UE,
   evaluations: Evaluation[],
   gradeMap: Map<string, Grade>,
+  inferredBlankAbsences: Set<string> = new Set<string>(),
 ): UEComputedResult {
   const elements = evaluations
     .filter((e) => e.ue_id === ue.id && e.active)
     .map((evaluation) => {
-      const grade = gradeMap.get(`${studentId}:${evaluation.id}`) || null;
-      return { evaluation, grade, value: gradeValue(grade) };
+      const key = `${studentId}:${evaluation.id}`;
+      const grade = gradeMap.get(key) || null;
+      const inferredAbsence = inferredBlankAbsences.has(key);
+      return { evaluation, grade, value: gradeValue(grade, inferredAbsence), inferredAbsence };
     });
 
   if (!elements.length) {
@@ -109,7 +150,7 @@ export function computeStudentUE(
 
   const compensation = validated && elements.some((e) => {
     const f = e.grade?.final_mention;
-    return f === 'C' || f === 'D' || e.grade?.absence === 'AJ' || e.grade?.absence === 'ANJ';
+    return f === 'C' || f === 'D' || e.grade?.absence === 'AJ' || e.grade?.absence === 'ANJ' || e.inferredAbsence;
   });
 
   return { ue, mention, weightedAverage: avg, validated, compensation, missing, elements };
@@ -120,8 +161,9 @@ export function computeStudentUEs(
   ues: UE[],
   evaluations: Evaluation[],
   gradeMap: Map<string, Grade>,
+  inferredBlankAbsences: Set<string> = new Set<string>(),
 ) {
-  return ues.map((ue) => computeStudentUE(studentId, ue, evaluations, gradeMap));
+  return ues.map((ue) => computeStudentUE(studentId, ue, evaluations, gradeMap, inferredBlankAbsences));
 }
 
 export function isEvaluationCompensated(
@@ -130,12 +172,13 @@ export function isEvaluationCompensated(
   ues: UE[],
   evaluations: Evaluation[],
   gradeMap: Map<string, Grade>,
+  inferredBlankAbsences: Set<string> = new Set<string>(),
 ) {
   if (!evaluation.ue_id) return false;
   const ue = ues.find((x) => x.id === evaluation.ue_id);
   if (!ue) return false;
-  const result = computeStudentUE(studentId, ue, evaluations, gradeMap);
-  return result.validated && result.compensation;
+  const result = computeStudentUE(studentId, ue, evaluations, gradeMap, inferredBlankAbsences);
+  return result.validated && result.compensation && !result.missing;
 }
 
 export function buildRetakeMap(
@@ -145,21 +188,24 @@ export function buildRetakeMap(
   ues: UE[],
 ) {
   const gradeMap = makeGradeMap(grades);
+  const inferredBlankAbsences = makeInferredBlankAbsenceSet(students, evaluations, grades);
   const current = new Map<string, Student[]>();
   const failedAfterResit = new Map<string, Student[]>();
 
   for (const evaluation of evaluations.filter((e) => e.active)) {
     for (const student of students.filter((s) => s.active)) {
-      const grade = gradeMap.get(`${student.id}:${evaluation.id}`);
-      if (!gradeNeedsRetake(grade)) continue;
-      if (isEvaluationCompensated(student.id, evaluation, ues, evaluations, gradeMap)) continue;
+      const key = `${student.id}:${evaluation.id}`;
+      const grade = gradeMap.get(key);
+      const inferredAbsence = inferredBlankAbsences.has(key);
+      if (!gradeNeedsRetake(grade, inferredAbsence)) continue;
+      if (isEvaluationCompensated(student.id, evaluation, ues, evaluations, gradeMap, inferredBlankAbsences)) continue;
       const target = gradeHadResit(grade) ? failedAfterResit : current;
       const list = target.get(evaluation.id) || [];
       list.push(student);
       target.set(evaluation.id, list);
     }
   }
-  return { current, failedAfterResit };
+  return { current, failedAfterResit, inferredBlankAbsences };
 }
 
 export function buildParallelGroups(evaluations: Evaluation[], currentRetakes: Map<string, Student[]>) {
@@ -191,19 +237,15 @@ export function buildParallelGroups(evaluations: Evaluation[], currentRetakes: M
 export function defaultPreconisations(
   computed: JuryComputed,
   record: JuryRecord | null,
-  hasPreviousJury: boolean,
-  absenceThreshold: number,
+  _hasPreviousJury = false,
 ): number[] {
   const ids = new Set<number>();
   if (record?.major_behavior_issue) ids.add(9);
   if (record && !record.previous_recommendations_respected) ids.add(15);
   if (computed.pendingPreviousDebts > 0) ids.add(7);
-  if (computed.absences >= absenceThreshold) ids.add(22);
+  if (computed.unjustifiedAbsences > 0) ids.add(22);
   if (computed.totalUeNotValidated >= 2) ids.add(14);
-
   if (computed.automaticOpinion === 'favorable') ids.add(2);
-  // Une seule UE non validée n'entraîne pas automatiquement la préconisation #14,
-  // dont le texte parle explicitement de plusieurs rattrapages.
   return [...ids];
 }
 
@@ -215,33 +257,49 @@ export function computeJury(
   grades: Grade[],
   debts: Debt[],
   record: JuryRecord | null,
+  cohortStudents: Student[] = [student],
 ): JuryComputed {
   const semesters = yearToSemesters(yearLabel);
   const relevantEvals = evaluations.filter((e) => semesters.includes(e.semester) && e.active);
-  const relevantUes = ues.filter((u) => semesters.includes(u.semester));
+  const relevantUes = ues.filter((u) => semesters.includes(u.semester) && u.active !== false);
   const gradeMap = makeGradeMap(grades);
-  const results = computeStudentUEs(student.id, relevantUes, relevantEvals, gradeMap);
+  const inferredBlankAbsences = makeInferredBlankAbsenceSet(cohortStudents, relevantEvals, grades);
+  const results = computeStudentUEs(student.id, relevantUes, relevantEvals, gradeMap, inferredBlankAbsences);
+  const finalizedResults = results.filter((r) => !r.missing);
 
   const semesterValidated: Record<number, boolean | null> = {};
+  const semesterComplete: Record<number, boolean> = {};
   for (const semester of semesters) {
-    const sResults = results.filter((r) => r.ue.semester === semester);
-    semesterValidated[semester] = sResults.length
-      ? sResults.every((r) => r.validated && !r.missing)
-      : null;
+    const allSemesterResults = results.filter((r) => r.ue.semester === semester);
+    const finalizedSemesterResults = allSemesterResults.filter((r) => !r.missing);
+    const complete = allSemesterResults.length > 0 && finalizedSemesterResults.length === allSemesterResults.length;
+    semesterComplete[semester] = complete;
+    if (!finalizedSemesterResults.length) semesterValidated[semester] = null;
+    else if (finalizedSemesterResults.some((r) => !r.validated)) semesterValidated[semester] = false;
+    else semesterValidated[semester] = complete ? true : null;
   }
 
-  const ectsAcquired = results.reduce((sum, r) => sum + (r.validated ? Number(r.ue.ects || 0) : 0), 0);
-  const nonValidated = results.filter((r) => !r.validated && !r.missing);
+  const yearComplete = semesters.every((semester) => semesterComplete[semester]);
+  const ectsAcquired = finalizedResults.reduce((sum, r) => sum + (r.validated ? Number(r.ue.ects || 0) : 0), 0);
+  const nonValidated = finalizedResults.filter((r) => !r.validated);
   const academicUeNotValidated = nonValidated.filter((r) => !r.ue.is_enterprise).length;
   const totalUeNotValidated = nonValidated.length;
+
+  const blankAbsences = relevantEvals.reduce((sum, e) => sum + (inferredBlankAbsences.has(`${student.id}:${e.id}`) ? 1 : 0), 0);
   const missingGrades = relevantEvals.reduce((sum, e) => {
-    const g = gradeMap.get(`${student.id}:${e.id}`);
-    return sum + (!g || (!g.final_mention && !g.absence) ? 1 : 0);
+    const key = `${student.id}:${e.id}`;
+    const g = gradeMap.get(key);
+    return sum + (!hasResult(g) && !inferredBlankAbsences.has(key) ? 1 : 0);
   }, 0);
-  const absences = relevantEvals.reduce((sum, e) => {
+  const justifiedAbsences = relevantEvals.reduce((sum, e) => {
     const g = gradeMap.get(`${student.id}:${e.id}`);
-    return sum + (g?.absence === 'AJ' || g?.absence === 'ANJ' ? 1 : 0);
+    return sum + (g?.absence === 'AJ' ? 1 : 0);
   }, 0);
+  const unjustifiedAbsences = relevantEvals.reduce((sum, e) => {
+    const g = gradeMap.get(`${student.id}:${e.id}`);
+    return sum + (g?.absence === 'ANJ' ? 1 : 0);
+  }, 0);
+  const absences = blankAbsences + justifiedAbsences + unjustifiedAbsences;
 
   const currentYearNumber = Number(yearLabel.replace(/\D/g, '')) || 0;
   const studentDebts = debts.filter((d) => d.student_id === student.id);
@@ -253,43 +311,51 @@ export function computeJury(
   const validatedPreviousDebts = previous.filter((d) => d.status === 'validated').length;
 
   const reasons: string[] = [];
-  if (missingGrades) reasons.push(`${missingGrades} note(s) non saisie(s)`);
   if (academicUeNotValidated) reasons.push(`${academicUeNotValidated} UE académique(s) non validée(s)`);
   if (pendingPreviousDebts) reasons.push(`${pendingPreviousDebts} dette(s) antérieure(s) non validée(s)`);
   if (validatedPreviousDebts) reasons.push(`${validatedPreviousDebts} ex-dette(s)`);
-  if (absences) reasons.push(`${absences} absence(s) AJ/ANJ`);
+  if (blankAbsences) reasons.push(`${blankAbsences} absence(s)`);
+  if (justifiedAbsences) reasons.push(`${justifiedAbsences} AJ`);
+  if (unjustifiedAbsences) reasons.push(`${unjustifiedAbsences} ANJ`);
   if (record?.major_behavior_issue) reasons.push('Écart de comportement majeur');
   if (record && !record.previous_recommendations_respected) reasons.push('Préconisations précédentes non respectées');
 
-  let automaticOpinion: JuryOpinion | null = null;
-  const hasReferenceData = semesters.every((semester) => relevantUes.some((ue) => ue.semester === semester));
-  if (hasReferenceData && missingGrades === 0) {
+  let automaticOpinion: Exclude<JuryOpinion, 'indetermine'> | null = null;
+  const hasReferenceData = relevantUes.length > 0;
+  if (hasReferenceData) {
     const bothSemestersValidated = semesters.every((s) => semesterValidated[s] === true);
     if (
-      ectsAcquired < 18 ||
       pendingPreviousDebts > 0 ||
       record?.major_behavior_issue ||
       (record && !record.previous_recommendations_respected)
     ) {
       automaticOpinion = 'defavorable';
+    } else if (yearComplete && ectsAcquired < 18) {
+      automaticOpinion = 'defavorable';
     } else if (bothSemestersValidated) {
       automaticOpinion = 'favorable';
-    } else if (academicUeNotValidated <= 3) {
-      automaticOpinion = 'reserve';
-    } else {
+    } else if (academicUeNotValidated > 3) {
       automaticOpinion = 'defavorable';
+    } else if (academicUeNotValidated > 0 || totalUeNotValidated > 0) {
+      automaticOpinion = 'reserve';
     }
   }
 
   return {
     automaticOpinion,
     semesterValidated,
+    semesterComplete,
+    yearComplete,
+    finalizedUeCount: finalizedResults.length,
     ectsAcquired,
     academicUeNotValidated,
     totalUeNotValidated,
     pendingPreviousDebts,
     validatedPreviousDebts,
     absences,
+    blankAbsences,
+    justifiedAbsences,
+    unjustifiedAbsences,
     missingGrades,
     reasons,
   };

@@ -138,6 +138,7 @@ export async function POST(request: NextRequest) {
       ues: upsertedUes?.length || 0,
       evaluations_matched: matched,
       evaluations_created: created,
+      evaluations_total: matched + created,
       debts_detected: debtSync.detected,
       debts_created: debtSync.inserted,
     });

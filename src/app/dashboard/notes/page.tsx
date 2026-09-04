@@ -9,7 +9,7 @@ import SessionSelect from '@/components/SessionSelect';
 import { GradeBadge } from '@/components/Badge';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
 import type { CesiSession, Evaluation, Grade, Student, UE } from '@/lib/types';
-import { computeStudentUEs, makeGradeMap, parseMention } from '@/lib/results';
+import { computeStudentUEs, makeGradeMap, makeInferredBlankAbsenceSet, parseMention } from '@/lib/results';
 import { cycleYears, displayStudent } from '@/lib/utils';
 
 export default function NotesPage() {
@@ -68,15 +68,9 @@ export default function NotesPage() {
 
   const currentSession = sessions.find((s) => s.id === sessionId);
   const gradeMap = useMemo(() => makeGradeMap(grades), [grades]);
+  const inferredBlankAbsences = useMemo(() => makeInferredBlankAbsenceSet(students, evaluations, grades), [students, evaluations, grades]);
   const filteredStudents = useMemo(() => students.filter((s) => displayStudent(s.first_name, s.last_name).toLowerCase().includes(search.toLowerCase())), [search, students]);
-  const missingCount = useMemo(() => {
-    let count = 0;
-    for (const student of students) for (const evaluation of evaluations) {
-      const g = gradeMap.get(`${student.id}:${evaluation.id}`);
-      if (!g || (!g.final_mention && !g.absence)) count += 1;
-    }
-    return count;
-  }, [evaluations, gradeMap, students]);
+
 
   async function saveGrade(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -143,7 +137,7 @@ export default function NotesPage() {
     });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), `S${semester} Notes`);
-    const ueRows = filteredStudents.flatMap((student) => computeStudentUEs(student.id, ues, evaluations, gradeMap).map((r) => ({
+    const ueRows = filteredStudents.flatMap((student) => computeStudentUEs(student.id, ues, evaluations, gradeMap, inferredBlankAbsences).map((r) => ({
       Prénom: student.first_name,
       Nom: student.last_name,
       UE: r.ue.name,
@@ -162,7 +156,7 @@ export default function NotesPage() {
       <div className="flex flex-col xl:flex-row xl:items-end justify-between gap-4">
         <div>
           <h1 className="page-title">Notes & UE</h1>
-          <p className="page-subtitle">La lettre finale est affichée. Survolez-la pour voir la note numérique et le détail du rattrapage.</p>
+          <p className="page-subtitle">Consultez et modifiez les résultats par semestre et par UE.</p>
         </div>
         <div className="flex flex-wrap items-end gap-3">
           <SessionSelect sessions={sessions} value={sessionId} onChange={(id) => {
@@ -182,7 +176,6 @@ export default function NotesPage() {
           <button className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'ue' ? 'bg-gray-100' : 'muted'}`} onClick={() => setView('ue')}>Résultats UE</button>
         </div>
         <div className="flex items-center gap-3">
-          <span className={`status-badge ${missingCount ? 'grade-c' : 'grade-a'}`}>{missingCount} note(s) non saisie(s)</span>
           <label className="relative min-w-[260px]"><Search size={16} className="absolute left-3 top-3 text-gray-400" /><input className="form-input !pl-9" placeholder="Rechercher un étudiant…" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
         </div>
       </div>
@@ -222,7 +215,7 @@ export default function NotesPage() {
         <div className="space-y-4">
           {!ues.length ? <div className="card p-6 text-sm muted">Aucun référentiel rattaché à S{semester}. Importez le cahier des charges dans l’onglet Imports.</div> : null}
           {filteredStudents.map((student) => {
-            const results = computeStudentUEs(student.id, ues, evaluations, gradeMap);
+            const results = computeStudentUEs(student.id, ues, evaluations, gradeMap, inferredBlankAbsences);
             const notValidated = results.filter((r) => !r.validated && !r.missing).length;
             return (
               <section className="card p-5" key={student.id}>
@@ -252,7 +245,7 @@ export default function NotesPage() {
       <Modal open={Boolean(selected)} onClose={() => { setSelected(null); setError(''); }} title={selected ? `${displayStudent(selected.student.first_name, selected.student.last_name)} · ${selected.evaluation.name}` : 'Modifier la note'}>
         {selected ? (
           <form className="space-y-4" onSubmit={saveGrade}>
-            <div className="rounded-xl bg-gray-50 p-3 text-xs muted">Saisissez par exemple <strong>B</strong> ou <strong>C/B</strong>. En cas de slash, la dernière lettre est celle qui prime et qui s’affiche. AJ et ANJ ont pour le moment le même effet dans les calculs.</div>
+            <div className="rounded-xl bg-gray-50 p-3 text-xs muted">Saisissez une mention (A, B, C ou D), un résultat de rattrapage comme <strong>C/B</strong>, ou renseignez une absence ci-dessous.</div>
             <label className="block"><span className="form-label">Mention / rattrapage</span><input name="mention" className="form-input" defaultValue={selected.grade?.raw_mention || ''} placeholder="A, B, C, D ou C/B" /></label>
             <label className="block"><span className="form-label">Note numérique / détail</span><input name="numeric" className="form-input" defaultValue={selected.grade?.numeric_note_text || ''} placeholder="ex. 8,5 / 20 ou DS : ..." /></label>
             <label className="block"><span className="form-label">Absence</span><select name="absence" className="form-select" defaultValue={selected.grade?.absence || ''}><option value="">Aucune</option><option value="AJ">AJ — absence justifiée</option><option value="ANJ">ANJ — absence injustifiée</option></select></label>

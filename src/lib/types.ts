@@ -1,7 +1,7 @@
 export type CycleType = 'ingenieur' | 'cpi';
 export type AbsenceStatus = 'AJ' | 'ANJ';
 export type DebtStatus = 'pending' | 'validated';
-export type JuryOpinion = 'favorable' | 'reserve' | 'defavorable';
+export type JuryOpinion = 'favorable' | 'reserve' | 'defavorable' | 'indetermine';
 
 export interface Profile {
   id: string;
@@ -105,18 +105,25 @@ export interface UEComputedResult {
     evaluation: Evaluation;
     grade: Grade | null;
     value: number | null;
+    inferredAbsence: boolean;
   }>;
 }
 
 export interface JuryComputed {
-  automaticOpinion: JuryOpinion | null;
+  automaticOpinion: Exclude<JuryOpinion, 'indetermine'> | null;
   semesterValidated: Record<number, boolean | null>;
+  semesterComplete: Record<number, boolean>;
+  yearComplete: boolean;
+  finalizedUeCount: number;
   ectsAcquired: number;
   academicUeNotValidated: number;
   totalUeNotValidated: number;
   pendingPreviousDebts: number;
   validatedPreviousDebts: number;
   absences: number;
+  blankAbsences: number;
+  justifiedAbsences: number;
+  unjustifiedAbsences: number;
   missingGrades: number;
   reasons: string[];
 }

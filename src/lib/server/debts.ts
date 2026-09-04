@@ -1,6 +1,6 @@
 import 'server-only';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
-import { computeStudentUE, gradeHadResit, makeGradeMap } from '@/lib/results';
+import { computeStudentUE, gradeHadResit, gradeNeedsRetake, makeGradeMap, makeInferredBlankAbsenceSet } from '@/lib/results';
 import { semesterToYear } from '@/lib/utils';
 import type { Evaluation, Grade, Student, UE } from '@/lib/types';
 
@@ -25,6 +25,7 @@ export async function syncDebtsForSession(sessionId: string, userId?: string) {
   const typedUes = (ues || []) as UE[];
   const typedEvaluations = (evaluations || []) as Evaluation[];
   const gradeMap = makeGradeMap(grades);
+  const inferredBlankAbsences = makeInferredBlankAbsenceSet(typedStudents, typedEvaluations, grades);
   const candidates: Array<{
     student_id: string;
     ue_id: string;
@@ -36,10 +37,18 @@ export async function syncDebtsForSession(sessionId: string, userId?: string) {
 
   for (const student of typedStudents) {
     for (const ue of typedUes) {
-      const result = computeStudentUE(student.id, ue, typedEvaluations, gradeMap);
-      if (result.missing || result.validated) continue;
-      const hadResit = result.elements.some((element) => gradeHadResit(element.grade));
-      if (!hadResit) continue;
+      const result = computeStudentUE(student.id, ue, typedEvaluations, gradeMap, inferredBlankAbsences);
+
+      // Une dette n'est créée que lorsque l'UE est réellement finalisée, qu'elle reste
+      // non validée, et qu'il n'existe plus de C/D à rattraper sans résultat de rattrapage.
+      // Exemple : C/C + B + B dans une UE finale C => dette.
+      if (result.missing || result.validated || result.weightedAverage === null) continue;
+      const gradesStillFailing = result.elements.filter((element) => gradeNeedsRetake(element.grade, element.inferredAbsence));
+      if (!gradesStillFailing.length) continue;
+      const atLeastOneResit = result.elements.some((element) => gradeHadResit(element.grade));
+      const allFailingGradesHaveResit = gradesStillFailing.every((element) => gradeHadResit(element.grade));
+      if (!atLeastOneResit || !allFailingGradesHaveResit) continue;
+
       candidates.push({
         student_id: student.id,
         ue_id: ue.id,

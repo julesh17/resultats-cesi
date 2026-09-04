@@ -178,6 +178,14 @@ alter default privileges in schema public
 alter default privileges in schema public
   grant execute on functions to authenticated, service_role;
 
+
+
+-- -----------------------------------------------------------------------------
+-- 4. Jury : permettre un avis explicitement indéterminé
+-- -----------------------------------------------------------------------------
+-- Requis par les raccourcis clavier et l'édition manuelle du jury.
+alter type public.jury_opinion add value if not exists 'indetermine';
+
 -- Contrôle final. Chaque table doit afficher TRUE pour authenticated_select et
 -- service_role_select. service_role_insert doit également être TRUE.
 select

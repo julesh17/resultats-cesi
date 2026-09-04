@@ -57,6 +57,18 @@ function normalizedPersonKey(person: string) {
   return normalizeText(person).replace(/\s+/g, '-');
 }
 
+function semesterFromLabel(label: string): number | null {
+  const patterns = [
+    /semestre\s*(10|[1-9])/i,
+    /\bS(10|[1-9])\b/i,
+  ];
+  for (const pattern of patterns) {
+    const m = label.match(pattern);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
 export function parseNotesWorkbook(buffer: ArrayBuffer): NotesImportRow[] {
   const rows = readFirstSheet(buffer);
   if (!rows.length) throw new Error('Le fichier de notes est vide.');
@@ -75,6 +87,46 @@ export function parseNotesWorkbook(buffer: ArrayBuffer): NotesImportRow[] {
   const evalColumns = columns.filter((c) => /^Eval\s*-/i.test(c));
   if (!evalColumns.length) throw new Error("Aucune colonne 'Eval - ...' trouvée.");
 
+  // Les colonnes Seme/Notes décrivent l'évaluation elle-même. Le semestre est donc
+  // déterminé une fois par colonne (à partir de la première valeur disponible), plutôt
+  // que ligne par ligne. Cela évite de perdre une lettre lorsqu'une cellule Seme isolée
+  // est vide alors que la mention est bien présente.
+  const descriptors = evalColumns.map((evalColumn) => {
+    const suffix = shortEvaluationName(evalColumn);
+    const semeColumn = columns.find((c) => normalizeText(c) === normalizeText(`Seme - ${suffix}`));
+    const notesColumn = columns.find((c) => normalizeText(c) === normalizeText(`Notes - ${suffix}`));
+    const absenceColumn = columns.find((c) => {
+      const n = normalizeText(c);
+      return n === normalizeText(`Abs - ${suffix}`)
+        || n === normalizeText(`Absence - ${suffix}`)
+        || n === normalizeText(`Absences - ${suffix}`);
+    });
+
+    let semester: number | null = null;
+    if (semeColumn) {
+      for (const row of rows) {
+        const candidate = safeNumber(row[semeColumn]);
+        if (candidate && candidate >= 1 && candidate <= 10) {
+          semester = candidate;
+          break;
+        }
+      }
+    }
+    semester = semester || semesterFromLabel(suffix);
+
+    return {
+      evalColumn,
+      suffix,
+      normalizedName: normalizeText(suffix),
+      semeColumn,
+      notesColumn,
+      absenceColumn,
+      semester: semester || 0,
+    };
+  }).filter((descriptor) => descriptor.semester >= 1 && descriptor.semester <= 10);
+
+  if (!descriptors.length) throw new Error('Aucun semestre exploitable n’a été trouvé dans le fichier de notes.');
+
   return rows
     .filter((row) => String(row.Session || '').trim() && String(row.Personne || '').trim())
     .map((row) => {
@@ -84,43 +136,31 @@ export function parseNotesWorkbook(buffer: ArrayBuffer): NotesImportRow[] {
         : null;
       const personRaw = String(row.Personne).trim();
       const { firstName, lastName } = splitPerson(personRaw);
-      const grades = evalColumns.map((evalColumn) => {
-        const suffix = shortEvaluationName(evalColumn);
-        const semeColumn = columns.find((c) => normalizeText(c) === normalizeText(`Seme - ${suffix}`));
-        const notesColumn = columns.find((c) => normalizeText(c) === normalizeText(`Notes - ${suffix}`));
-        const absenceColumn = columns.find((c) => {
-          const n = normalizeText(c);
-          return (
-            n === normalizeText(`Abs - ${suffix}`) ||
-            n === normalizeText(`Absence - ${suffix}`) ||
-            n === normalizeText(`Absences - ${suffix}`)
-          );
-        });
 
-        const parsed = parseMention(row[evalColumn]);
-        const explicitAbsenceRaw = absenceColumn ? String(row[absenceColumn] || '').trim().toUpperCase() : '';
+      const grades = descriptors.map((descriptor) => {
+        const parsed = parseMention(row[descriptor.evalColumn]);
+        const explicitAbsenceRaw = descriptor.absenceColumn
+          ? String(row[descriptor.absenceColumn] || '').trim().toUpperCase()
+          : '';
         const absence = explicitAbsenceRaw === 'AJ' || explicitAbsenceRaw === 'ANJ'
           ? explicitAbsenceRaw
           : parsed.absence;
-        const semesterValue = semeColumn ? safeNumber(row[semeColumn]) : null;
-        const semesterFromName = suffix.match(/semestre\s*(\d+)/i)?.[1];
-        const semester = semesterValue || (semesterFromName ? Number(semesterFromName) : 0);
-        const numericRaw = notesColumn ? row[notesColumn] : null;
+        const numericRaw = descriptor.notesColumn ? row[descriptor.notesColumn] : null;
         const numericNoteText = numericRaw === null || numericRaw === undefined || String(numericRaw).trim() === ''
           ? null
           : String(numericRaw).trim();
 
         return {
-          evaluationName: suffix,
-          normalizedName: normalizeText(suffix),
-          semester,
+          evaluationName: descriptor.suffix,
+          normalizedName: descriptor.normalizedName,
+          semester: descriptor.semester,
           rawMention: absence ? null : parsed.raw,
           initialMention: absence ? null : parsed.initial,
           finalMention: absence ? null : parsed.final,
           numericNoteText,
           absence,
         };
-      }).filter((g) => g.semester >= 1 && g.semester <= 10);
+      });
 
       return {
         sessionName,
@@ -167,18 +207,19 @@ export function parseReferentielWorkbook(buffer: ArrayBuffer): ReferentielRow[] 
   });
 }
 
-const STOP_WORDS = new Set(['de', 'la', 'le', 'les', 'du', 'des', 'et', 'en', 'un', 'une', 'a', 'au', 'aux', 'semestre']);
+const STOP_WORDS = new Set(['', 'de', 'la', 'le', 'les', 'du', 'des', 'et', 'en', 'un', 'une', 'a', 'au', 'aux']);
 
+// Reprend volontairement la règle de l'application Streamlit qui fonctionnait bien :
+// égalité, inclusion, puis au moins trois mots significatifs communs.
 export function fuzzyScore(a: string, b: string) {
   const na = normalizeText(a);
   const nb = normalizeText(b);
   if (!na || !nb) return 0;
   if (na === nb) return 100;
   if (na.includes(nb) || nb.includes(na)) return 90;
-  const ta = new Set(na.split(' ').filter((x) => x.length > 1 && !STOP_WORDS.has(x)));
-  const tb = new Set(nb.split(' ').filter((x) => x.length > 1 && !STOP_WORDS.has(x)));
+  const ta = new Set(na.split(/[\s\-:,()]+/).filter((x) => x.length > 0 && !STOP_WORDS.has(x)));
+  const tb = new Set(nb.split(/[\s\-:,()]+/).filter((x) => x.length > 0 && !STOP_WORDS.has(x)));
   let common = 0;
   ta.forEach((word) => { if (tb.has(word)) common += 1; });
-  const denom = Math.max(ta.size, tb.size, 1);
-  return (common / denom) * 80;
+  return common >= 3 ? 60 + Math.min(common, 20) : 0;
 }

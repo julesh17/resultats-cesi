@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, BookOpenCheck, CircleHelp, RotateCcw, WalletCards, ArrowRight } from 'lucide-react';
+import { AlertTriangle, RotateCcw, WalletCards, ArrowRight } from 'lucide-react';
 import StatCard from '@/components/StatCard';
 import Loading from '@/components/Loading';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
@@ -49,7 +49,6 @@ export default function DashboardPage() {
   const dashboard = useMemo(() => {
     const targetIds = new Set(followedIds.length ? followedIds : sessions.map((s) => s.id));
     const targetSessions = sessions.filter((s) => targetIds.has(s.id));
-    const missing: Array<{ student: Student; evaluation: Evaluation; session: CesiSession }> = [];
     const complex: Array<{ student: Student; session: CesiSession; reasons: string[]; score: number }> = [];
     let currentRetakes = 0;
 
@@ -66,38 +65,38 @@ export default function DashboardPage() {
       currentRetakes += [...retakes.current.values()].reduce((sum, list) => sum + list.length, 0);
 
       for (const student of ss) {
-        let missingCount = 0;
-        let absences = 0;
+        let blankAbs = 0;
+        let aj = 0;
+        let anj = 0;
         for (const evaluation of ee) {
-          const grade = gradeMap.get(`${student.id}:${evaluation.id}`);
-          if (!grade || (!grade.final_mention && !grade.absence)) {
-            missing.push({ student, evaluation, session });
-            missingCount += 1;
-          }
-          if (grade?.absence) absences += 1;
+          const key = `${student.id}:${evaluation.id}`;
+          const grade = gradeMap.get(key);
+          if (retakes.inferredBlankAbsences.has(key)) blankAbs += 1;
+          if (grade?.absence === 'AJ') aj += 1;
+          if (grade?.absence === 'ANJ') anj += 1;
         }
-        const ueResults = computeStudentUEs(student.id, uu, ee, gradeMap);
+        const ueResults = computeStudentUEs(student.id, uu, ee, gradeMap, retakes.inferredBlankAbsences);
         const nonValidated = ueResults.filter((r) => !r.validated && !r.missing).length;
         const pendingDebt = dd.filter((d) => d.student_id === student.id && d.status === 'pending').length;
         const formerDebt = dd.filter((d) => d.student_id === student.id && d.status === 'validated').length;
         const reasons: string[] = [];
         if (pendingDebt) reasons.push(`${pendingDebt} dette(s) en cours`);
         if (nonValidated) reasons.push(`${nonValidated} UE non validée(s)`);
-        if (absences >= 3) reasons.push(`${absences} absences AJ/ANJ`);
+        if (blankAbs) reasons.push(`${blankAbs} absence(s)`);
+        if (anj) reasons.push(`${anj} ANJ`);
+        if (aj) reasons.push(`${aj} AJ`);
         if (formerDebt) reasons.push(`${formerDebt} ex-dette(s)`);
-        if (missingCount) reasons.push(`${missingCount} note(s) manquante(s)`);
         if (reasons.length) complex.push({
           student,
           session,
           reasons,
-          score: pendingDebt * 20 + nonValidated * 10 + absences * 2 + formerDebt * 3 + missingCount,
+          score: pendingDebt * 20 + nonValidated * 10 + blankAbs * 2 + anj * 4 + aj * 2 + formerDebt * 3,
         });
       }
     }
     complex.sort((a, b) => b.score - a.score || a.student.last_name.localeCompare(b.student.last_name));
     return {
       targetSessions,
-      missing,
       complex,
       currentRetakes,
       pendingDebts: debts.filter((d) => d.status === 'pending' && students.some((s) => s.id === d.student_id && targetIds.has(s.session_id))).length,
@@ -124,62 +123,35 @@ export default function DashboardPage() {
         </div>
       ) : null}
 
-      <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <StatCard label="Cas particuliers" value={dashboard.complex.length} hint="Dettes, UE, absences ou notes manquantes" icon={AlertTriangle} />
-        <StatCard label="Notes non saisies" value={dashboard.missing.length} hint="Cellules sans lettre ni AJ/ANJ" icon={CircleHelp} />
-        <StatCard label="Rattrapages" value={dashboard.currentRetakes} hint="Situations C/D/AJ/ANJ non compensées" icon={RotateCcw} />
-        <StatCard label="Dettes en cours" value={dashboard.pendingDebts} hint="Après épreuve complémentaire non validée" icon={WalletCards} />
+      <div className="grid sm:grid-cols-3 gap-4">
+        <StatCard label="Cas particuliers" value={dashboard.complex.length} hint="UE, dettes, absences et ex-dettes" icon={AlertTriangle} />
+        <StatCard label="Rattrapages" value={dashboard.currentRetakes} hint="Situations à organiser" icon={RotateCcw} />
+        <StatCard label="Dettes en cours" value={dashboard.pendingDebts} hint="UE non validées après rattrapage" icon={WalletCards} />
       </div>
 
-      <div className="grid xl:grid-cols-[1.15fr_.85fr] gap-5">
-        <section className="card overflow-hidden">
-          <div className="px-5 py-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border)' }}>
-            <div>
-              <h2 className="section-title">Cas complexes prioritaires</h2>
-              <p className="text-xs muted mt-1">Le tri favorise les dettes et les UE non validées.</p>
+      <section className="card overflow-hidden">
+        <div className="px-5 py-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border)' }}>
+          <div>
+            <h2 className="section-title">Cas complexes prioritaires</h2>
+            <p className="text-xs muted mt-1">Le tri favorise les dettes et les UE non validées.</p>
+          </div>
+          <Link href="/dashboard/jury" className="text-sm text-blue-600 font-medium">Ouvrir le jury</Link>
+        </div>
+        <div className="divide-y" style={{ borderColor: 'var(--border)' }}>
+          {dashboard.complex.slice(0, 20).map((item) => (
+            <div key={`${item.student.id}-${item.session.id}`} className="px-5 py-4 flex flex-col md:flex-row md:items-center gap-3 justify-between">
+              <div className="min-w-0">
+                <div className="font-medium">{displayStudent(item.student.first_name, item.student.last_name)}</div>
+                <div className="text-xs muted mt-0.5">{item.session.name}</div>
+              </div>
+              <div className="flex flex-wrap gap-1.5 md:justify-end">
+                {item.reasons.map((r) => <span key={r} className="status-badge bg-gray-50 border-gray-200 text-gray-700">{r}</span>)}
+              </div>
             </div>
-            <Link href="/dashboard/jury" className="text-sm text-blue-600 font-medium">Ouvrir le jury</Link>
-          </div>
-          <div className="divide-y" style={{ borderColor: 'var(--border)' }}>
-            {dashboard.complex.slice(0, 12).map((item) => (
-              <div key={`${item.student.id}-${item.session.id}`} className="px-5 py-4 flex flex-col md:flex-row md:items-center gap-3 justify-between">
-                <div className="min-w-0">
-                  <div className="font-medium">{displayStudent(item.student.first_name, item.student.last_name)}</div>
-                  <div className="text-xs muted mt-0.5">{item.session.name}</div>
-                </div>
-                <div className="flex flex-wrap gap-1.5 md:justify-end">
-                  {item.reasons.map((r) => <span key={r} className="status-badge bg-gray-50 border-gray-200 text-gray-700">{r}</span>)}
-                </div>
-              </div>
-            ))}
-            {!dashboard.complex.length ? <div className="p-8 text-center text-sm muted">Aucun cas particulier détecté sur les sessions affichées.</div> : null}
-          </div>
-        </section>
-
-        <section className="card overflow-hidden">
-          <div className="px-5 py-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border)' }}>
-            <div>
-              <h2 className="section-title">Notes non saisies</h2>
-              <p className="text-xs muted mt-1">Les premières cellules manquantes détectées.</p>
-            </div>
-            <Link href="/dashboard/notes" className="text-sm text-blue-600 font-medium">Saisir</Link>
-          </div>
-          <div className="divide-y" style={{ borderColor: 'var(--border)' }}>
-            {dashboard.missing.slice(0, 12).map((item) => (
-              <div key={`${item.student.id}-${item.evaluation.id}`} className="px-5 py-3.5">
-                <div className="font-medium text-sm">{displayStudent(item.student.first_name, item.student.last_name)}</div>
-                <div className="text-xs muted mt-0.5 line-clamp-2">S{item.evaluation.semester} · {item.evaluation.name} · {item.session.name}</div>
-              </div>
-            ))}
-            {!dashboard.missing.length ? (
-              <div className="p-8 text-center">
-                <BookOpenCheck className="mx-auto text-emerald-500 mb-2" size={28} />
-                <div className="text-sm muted">Aucune note manquante détectée.</div>
-              </div>
-            ) : null}
-          </div>
-        </section>
-      </div>
+          ))}
+          {!dashboard.complex.length ? <div className="p-8 text-center text-sm muted">Aucun cas particulier détecté sur les sessions affichées.</div> : null}
+        </div>
+      </section>
 
       <div className="text-xs muted">
         {followedIds.length ? `Tableau de bord limité à ${dashboard.targetSessions.length} session(s) suivie(s).` : 'Aucune session suivie : le tableau de bord affiche toutes les sessions.'}
