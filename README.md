@@ -192,48 +192,6 @@ Les opérations ordinaires utilisent la clé publique Supabase avec une session 
 
 ---
 
-## Installation Supabase
-
-### 1. Créer le projet
-
-Créez un projet vide dans Supabase et attendez la fin de son initialisation.
-
-### 2. Exécuter le script SQL
-
-Dans **SQL Editor > New query**, ouvrez le fichier :
-
-```text
-supabase/setup.sql
-```
-
-Copiez tout son contenu, collez-le dans l'éditeur puis cliquez sur **Run**.
-
-Ce script crée :
-
-- les tables ;
-- les types ;
-- les index ;
-- la structure automatique A1…A5 / S1…S10 ;
-- les 26 préconisations ;
-- le bucket privé `imports` ;
-- les politiques RLS permettant à tous les comptes connectés de voir et modifier les données.
-
-### 3. Récupérer les clés
-
-Dans les paramètres API du projet Supabase, récupérez :
-
-- l'URL du projet ;
-- la **Publishable key** (`sb_publishable_...`) ;
-- la **Secret key** (`sb_secret_...`).
-
-Ne mettez jamais la Secret key dans une variable commençant par `NEXT_PUBLIC_`. Le projet accepte encore les anciennes clés `anon` / `service_role` comme solution de compatibilité, mais les nouvelles clés sont à privilégier.
-
-### 4. Authentification
-
-Aucune configuration de fournisseur email n'est nécessaire pour le fonctionnement prévu : les comptes sont créés par la route serveur de l'application et sont confirmés immédiatement.
-
----
-
 ## Déploiement GitHub + Vercel
 
 Aucun terminal n'est nécessaire.
