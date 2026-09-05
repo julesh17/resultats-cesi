@@ -76,6 +76,9 @@ export interface Debt {
   status: DebtStatus;
   validated_at: string | null;
   notes: string | null;
+  status_manual?: boolean;
+  status_updated_at?: string | null;
+  status_updated_by?: string | null;
   students?: Pick<Student, 'id' | 'first_name' | 'last_name' | 'session_id'>;
   ues?: Pick<UE, 'id' | 'name' | 'semester'>;
 }
@@ -94,6 +97,7 @@ export interface JuryRecord {
   major_behavior_issue: boolean;
   previous_recommendations_respected: boolean;
   supplementary_notes: string | null;
+  preconisations_locked?: boolean;
 }
 
 export interface UEComputedResult {
@@ -127,5 +131,6 @@ export interface JuryComputed {
   justifiedAbsences: number;
   unjustifiedAbsences: number;
   missingGrades: number;
+  resitCount: number;
   reasons: string[];
 }

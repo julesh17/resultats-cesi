@@ -202,6 +202,9 @@ create table if not exists public.debts (
   origin_semester smallint not null check (origin_semester between 1 and 10),
   status public.debt_status not null default 'pending',
   validated_at timestamptz,
+  status_manual boolean not null default false,
+  status_updated_at timestamptz,
+  status_updated_by uuid references public.profiles(id) on delete set null,
   notes text,
   created_by uuid references public.profiles(id) on delete set null,
   created_at timestamptz not null default now(),
@@ -217,6 +220,7 @@ create table if not exists public.jury_records (
   major_behavior_issue boolean not null default false,
   previous_recommendations_respected boolean not null default true,
   supplementary_notes text,
+  preconisations_locked boolean not null default false,
   created_by uuid references public.profiles(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -240,6 +244,10 @@ create table if not exists public.jury_preconisations (
 -- Indexes utiles
 alter table public.ues add column if not exists active boolean not null default true;
 alter table public.ues add column if not exists exclude_from_jury boolean not null default false;
+alter table public.debts add column if not exists status_manual boolean not null default false;
+alter table public.debts add column if not exists status_updated_at timestamptz;
+alter table public.debts add column if not exists status_updated_by uuid references public.profiles(id) on delete set null;
+alter table public.jury_records add column if not exists preconisations_locked boolean not null default false;
 
 create index if not exists idx_students_session on public.students(session_id);
 create index if not exists idx_evaluations_session_semester on public.evaluations(session_id, semester);

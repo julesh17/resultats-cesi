@@ -12,6 +12,7 @@ import SessionSelect from '@/components/SessionSelect';
 import Loading from '@/components/Loading';
 import Modal from '@/components/Modal';
 import { OpinionBadge } from '@/components/Badge';
+import StudentAcademicDetails from '@/components/StudentAcademicDetails';
 
 type JuryRow = {
   student: Student;
@@ -38,6 +39,7 @@ export default function JuryPage() {
   const [links, setLinks] = useState<Array<{ jury_record_id: string; preconisation_id: number }>>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<JuryRow | null>(null);
+  const [detailsRow, setDetailsRow] = useState<JuryRow | null>(null);
   const [saving, setSaving] = useState(false);
   const [activeRowId, setActiveRowId] = useState('');
   const [error, setError] = useState('');
@@ -180,11 +182,6 @@ export default function JuryPage() {
 
   const currentSession = sessions.find((s) => s.id === sessionId);
   const juryUes = useMemo(() => ues.filter((ue) => !ue.exclude_from_jury), [ues]);
-  const juryUeIds = useMemo(() => new Set(juryUes.map((ue) => ue.id)), [juryUes]);
-  const juryEvaluations = useMemo(
-    () => evaluations.filter((evaluation) => !evaluation.ue_id || juryUeIds.has(evaluation.ue_id)),
-    [evaluations, juryUeIds],
-  );
   const filteredUesForExclusion = useMemo(() => {
     const term = normalizeText(ueExclusionSearch);
     return ues.filter((ue) => !term || normalizeText(ue.name).includes(term));
@@ -192,7 +189,7 @@ export default function JuryPage() {
 
   const rows = useMemo<JuryRow[]>(() => students.map((student) => {
     const record = records.find((r) => r.student_id === student.id && r.year_label === yearLabel) || null;
-    const computed = computeJury(student, yearLabel, juryEvaluations, juryUes, grades, debts, record, students);
+    const computed = computeJury(student, yearLabel, evaluations, juryUes, grades, debts, record, students);
     const yearNumber = Number(yearLabel.slice(1));
     const hasPreviousJury = records.some((r) => r.student_id === student.id && Number(r.year_label.slice(1)) < yearNumber);
     const selectedPrecos = record ? links.filter((l) => l.jury_record_id === record.id).map((l) => l.preconisation_id) : [];
@@ -204,7 +201,7 @@ export default function JuryPage() {
       hasPreviousJury,
       selectedPrecos,
     };
-  }), [students, records, yearLabel, juryEvaluations, juryUes, grades, debts, links]);
+  }), [students, records, yearLabel, evaluations, juryUes, grades, debts, links]);
 
   const shownRows = rows.filter((r) => !complexOnly
     || r.computed.totalUeNotValidated > 0
@@ -236,6 +233,7 @@ export default function JuryPage() {
       major_behavior_issue: major,
       previous_recommendations_respected: previousRespected,
       supplementary_notes: notes,
+      preconisations_locked: true,
       created_by: auth.user?.id || null,
     };
     const rec = await supabase.from('jury_records').upsert(payload, { onConflict: 'student_id,year_label' }).select('*').single();
@@ -245,7 +243,7 @@ export default function JuryPage() {
     await supabase.from('jury_preconisations').delete().eq('jury_record_id', rec.data.id);
     if (selected.length) {
       const updatedRecord = { ...rec.data, major_behavior_issue: major, previous_recommendations_respected: previousRespected } as JuryRecord;
-      const autoComputed = computeJury(editing.student, yearLabel, juryEvaluations, juryUes, grades, debts, updatedRecord, students);
+      const autoComputed = computeJury(editing.student, yearLabel, evaluations, juryUes, grades, debts, updatedRecord, students);
       const autoIds = new Set(defaultPreconisations(autoComputed, updatedRecord, editing.hasPreviousJury));
       const ins = await supabase.from('jury_preconisations').insert(selected.map((id) => ({ jury_record_id: rec.data.id, preconisation_id: id, is_auto: autoIds.has(id) })));
       if (ins.error) { setError(ins.error.message); setSaving(false); return; }
@@ -310,10 +308,16 @@ export default function JuryPage() {
     setUes((current) => current.map((ue) => ({ ...ue, exclude_from_jury: false })));
   }
 
+  function preconisationIdsFor(row: JuryRow) {
+    return row.record?.preconisations_locked || row.selectedPrecos.length > 0
+      ? row.selectedPrecos
+      : defaultPreconisations(row.computed, row.record, row.hasPreviousJury);
+  }
+
   function exportJury() {
     const precoById = new Map<number, Preconisation>(preconisations.map((p) => [p.id, p]));
     const exportRows = rows.map((row) => {
-      const ids = row.selectedPrecos.length ? row.selectedPrecos : defaultPreconisations(row.computed, row.record, row.hasPreviousJury);
+      const ids = preconisationIdsFor(row);
       const semesters = yearToSemesters(yearLabel);
       const status = (semester: number) => row.computed.semesterValidated[semester] === true
         ? 'Validé'
@@ -387,7 +391,7 @@ export default function JuryPage() {
     {ues.length > 0 && !juryUes.length && !loading ? <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">Toutes les UE de {yearLabel} sont exclues du calcul du jury.</div> : null}
 
     {loading ? <Loading /> : <section className="card overflow-hidden"><div className="overflow-auto"><table className="min-w-full border-collapse"><thead><tr><th className="table-header">Étudiant</th><th className="table-header">S{semesters[0]}</th><th className="table-header">S{semesters[1]}</th><th className="table-header">ECTS acquis</th><th className="table-header">UE finalisées non validées</th><th className="table-header">Abs.</th><th className="table-header">Dettes</th><th className="table-header">Avis</th><th className="table-header">Préconisations</th><th className="table-header"></th></tr></thead><tbody>{shownRows.map((r) => {
-      const defaultIds = r.selectedPrecos.length ? r.selectedPrecos : defaultPreconisations(r.computed, r.record, r.hasPreviousJury);
+      const defaultIds = preconisationIdsFor(r);
       return <tr
         key={r.student.id}
         tabIndex={0}
@@ -397,7 +401,7 @@ export default function JuryPage() {
         className={`border-t align-top outline-none transition-colors ${activeRowId === r.student.id ? 'bg-blue-50/60 ring-1 ring-inset ring-blue-200' : 'hover:bg-gray-50/70'}`}
         style={{ borderColor:'var(--border)' }}
       >
-        <td className="table-cell font-medium whitespace-nowrap"><div>{displayStudent(r.student.first_name, r.student.last_name)}</div>{r.student.supplementary_info ? <div className="text-xs muted mt-1 max-w-[250px] whitespace-normal">{r.student.supplementary_info}</div> : null}</td>
+        <td className="table-cell font-medium whitespace-nowrap"><button type="button" className="text-left font-medium hover:text-blue-600 hover:underline underline-offset-2" onClick={(event) => { event.stopPropagation(); setDetailsRow(r); }}>{displayStudent(r.student.first_name, r.student.last_name)}</button>{r.student.supplementary_info ? <div className="text-xs muted mt-1 max-w-[250px] whitespace-normal">{r.student.supplementary_info}</div> : null}</td>
         {semesters.map((s) => <td key={s} className="table-cell"><span className={`status-badge ${r.computed.semesterValidated[s] === true ? 'grade-a' : r.computed.semesterValidated[s] === false ? 'grade-d' : 'grade-empty'}`}>{r.computed.semesterValidated[s] === true ? 'Validé' : r.computed.semesterValidated[s] === false ? 'Non validé' : 'En cours'}</span></td>)}
         <td className="table-cell font-medium">{r.computed.ectsAcquired}</td>
         <td className="table-cell">{r.computed.totalUeNotValidated} <span className="text-xs muted">({r.computed.academicUeNotValidated} acad.)</span></td>
@@ -409,9 +413,13 @@ export default function JuryPage() {
       </tr>;
     })}{!shownRows.length ? <tr><td colSpan={10} className="p-10 text-center text-sm muted">Aucun étudiant ne correspond au filtre.</td></tr> : null}</tbody></table></div></section>}
 
+    <Modal open={Boolean(detailsRow)} onClose={() => setDetailsRow(null)} title={detailsRow ? `${displayStudent(detailsRow.student.first_name, detailsRow.student.last_name)} · Détail académique ${yearLabel}` : 'Détail académique'} wide>
+      {detailsRow ? <StudentAcademicDetails student={detailsRow.student} students={students} ues={ues} evaluations={evaluations} grades={grades} debts={debts} /> : null}
+    </Modal>
+
     <Modal open={Boolean(editing)} onClose={() => { setEditing(null); setError(''); }} title={editing ? `${displayStudent(editing.student.first_name, editing.student.last_name)} · Jury ${yearLabel}` : 'Jury'} wide>
       {editing ? (() => {
-        const initialIds = editing.selectedPrecos.length ? editing.selectedPrecos : defaultPreconisations(editing.computed, editing.record, editing.hasPreviousJury);
+        const initialIds = preconisationIdsFor(editing);
         return <form className="space-y-6" onSubmit={saveJury}>
           <div className="grid md:grid-cols-3 gap-3"><div className="rounded-xl bg-gray-50 p-4"><div className="text-xs uppercase font-semibold muted">Avis automatique</div><div className="mt-2"><OpinionBadge opinion={editing.computed.automaticOpinion} /></div></div><div className="rounded-xl bg-gray-50 p-4"><div className="text-xs uppercase font-semibold muted">ECTS acquis</div><div className="text-xl font-semibold mt-1">{editing.computed.ectsAcquired}</div></div><div className="rounded-xl bg-gray-50 p-4"><div className="text-xs uppercase font-semibold muted">Points à surveiller</div><div className="text-xs mt-1">{editing.computed.reasons.join(' · ') || 'Aucun signal automatique'}</div></div></div>
           <div className="grid md:grid-cols-2 gap-4"><label className="block"><span className="form-label">Avis retenu</span><select name="opinion" className="form-select" defaultValue={editing.record?.opinion_override || 'auto'}><option value="auto">Automatique — {opinionLabel(editing.computed.automaticOpinion)}</option><option value="favorable">Avis favorable</option><option value="reserve">Avis réservé</option><option value="defavorable">Avis défavorable</option><option value="indetermine">Indéterminé</option></select></label><div className="space-y-3 pt-1"><label className="flex items-start gap-2 text-sm"><input name="major_behavior_issue" type="checkbox" defaultChecked={editing.record?.major_behavior_issue || false} className="mt-1" /><span><strong>Écart de comportement majeur</strong></span></label><label className="flex items-start gap-2 text-sm"><input name="previous_recommendations_respected" type="checkbox" defaultChecked={editing.record?.previous_recommendations_respected ?? true} className="mt-1" /><span><strong>Préconisations du jury précédent respectées</strong></span></label></div></div>

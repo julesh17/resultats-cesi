@@ -245,7 +245,10 @@ export function defaultPreconisations(
   if (computed.pendingPreviousDebts > 0) ids.add(7);
   if (computed.unjustifiedAbsences > 0) ids.add(22);
   if (computed.totalUeNotValidated >= 2) ids.add(14);
-  if (computed.automaticOpinion === 'favorable') ids.add(2);
+  if (computed.automaticOpinion === 'favorable') {
+    if (computed.resitCount === 0) ids.add(1);
+    else ids.add(2);
+  }
   return [...ids];
 }
 
@@ -262,7 +265,8 @@ export function computeJury(
   const semesters = yearToSemesters(yearLabel);
   const relevantUes = ues.filter((u) => semesters.includes(u.semester) && u.active !== false && !u.exclude_from_jury);
   const relevantUeIds = new Set(relevantUes.map((u) => u.id));
-  const relevantEvals = evaluations.filter((e) => semesters.includes(e.semester) && e.active && Boolean(e.ue_id && relevantUeIds.has(e.ue_id)));
+  const yearEvals = evaluations.filter((e) => semesters.includes(e.semester) && e.active);
+  const relevantEvals = yearEvals.filter((e) => Boolean(e.ue_id && relevantUeIds.has(e.ue_id)));
   const gradeMap = makeGradeMap(grades);
   const inferredBlankAbsences = makeInferredBlankAbsenceSet(cohortStudents, relevantEvals, grades);
   const results = computeStudentUEs(student.id, relevantUes, relevantEvals, gradeMap, inferredBlankAbsences);
@@ -301,6 +305,10 @@ export function computeJury(
     return sum + (g?.absence === 'ANJ' ? 1 : 0);
   }, 0);
   const absences = blankAbsences + justifiedAbsences + unjustifiedAbsences;
+  const resitCount = yearEvals.reduce((sum, e) => {
+    const grade = gradeMap.get(`${student.id}:${e.id}`);
+    return sum + (gradeHadResit(grade) ? 1 : 0);
+  }, 0);
 
   const currentYearNumber = Number(yearLabel.replace(/\D/g, '')) || 0;
   const studentDebts = debts.filter((d) => d.student_id === student.id);
@@ -358,6 +366,7 @@ export function computeJury(
     justifiedAbsences,
     unjustifiedAbsences,
     missingGrades,
+    resitCount,
     reasons,
   };
 }

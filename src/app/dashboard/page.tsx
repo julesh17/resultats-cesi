@@ -4,6 +4,8 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, RotateCcw, WalletCards, ArrowRight } from 'lucide-react';
 import StatCard from '@/components/StatCard';
+import Modal from '@/components/Modal';
+import StudentAcademicDetails from '@/components/StudentAcademicDetails';
 import Loading from '@/components/Loading';
 import { getSupabaseBrowser } from '@/lib/supabase/client';
 import { fetchAllRows } from '@/lib/supabase/fetchAll';
@@ -20,6 +22,7 @@ export default function DashboardPage() {
   const [grades, setGrades] = useState<Grade[]>([]);
   const [ues, setUes] = useState<UE[]>([]);
   const [debts, setDebts] = useState<Debt[]>([]);
+  const [selectedStudent, setSelectedStudent] = useState<{ student: Student; session: CesiSession; reasons: string[] } | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -142,7 +145,7 @@ export default function DashboardPage() {
           {dashboard.complex.slice(0, 20).map((item) => (
             <div key={`${item.student.id}-${item.session.id}`} className="px-5 py-4 flex flex-col md:flex-row md:items-center gap-3 justify-between">
               <div className="min-w-0">
-                <div className="font-medium">{displayStudent(item.student.first_name, item.student.last_name)}</div>
+                <button type="button" className="font-medium text-left hover:text-blue-600 hover:underline underline-offset-2" onClick={() => setSelectedStudent({ student: item.student, session: item.session, reasons: item.reasons })}>{displayStudent(item.student.first_name, item.student.last_name)}</button>
                 <div className="text-xs muted mt-0.5">{item.session.name}</div>
               </div>
               <div className="flex flex-wrap gap-1.5 md:justify-end">
@@ -157,6 +160,20 @@ export default function DashboardPage() {
       <div className="text-xs muted">
         {followedIds.length ? `Tableau de bord limité à ${dashboard.targetSessions.length} session(s) suivie(s).` : 'Aucune session suivie : le tableau de bord affiche toutes les sessions.'}
       </div>
+
+      <Modal open={Boolean(selectedStudent)} onClose={() => setSelectedStudent(null)} title={selectedStudent ? `${displayStudent(selectedStudent.student.first_name, selectedStudent.student.last_name)} · Détail` : 'Détail'} wide>
+        {selectedStudent ? <div className="space-y-4">
+          <div className="flex flex-wrap gap-1.5">{selectedStudent.reasons.map((reason) => <span key={reason} className="status-badge bg-gray-50 border-gray-200 text-gray-700">{reason}</span>)}</div>
+          <StudentAcademicDetails
+            student={selectedStudent.student}
+            students={students.filter((student) => student.session_id === selectedStudent.session.id)}
+            ues={ues.filter((ue) => ue.session_id === selectedStudent.session.id)}
+            evaluations={evaluations.filter((evaluation) => evaluation.session_id === selectedStudent.session.id)}
+            grades={grades.filter((grade) => students.some((student) => student.id === grade.student_id && student.session_id === selectedStudent.session.id))}
+            debts={debts}
+          />
+        </div> : null}
+      </Modal>
     </div>
   );
 }
