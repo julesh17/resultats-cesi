@@ -132,5 +132,10 @@ export interface JuryComputed {
   unjustifiedAbsences: number;
   missingGrades: number;
   resitCount: number;
+  resitValidatedCount: number;
+  toeicScore: number | null;
+  toeicPreviousScore: number | null;
+  toeicProgressed: boolean;
+  automaticOpinionReason: string;
   reasons: string[];
 }

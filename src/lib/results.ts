@@ -9,7 +9,7 @@ import type {
   UE,
   UEComputedResult,
 } from './types';
-import { semesterToYear, yearToSemesters } from './utils';
+import { normalizeText, semesterToYear, yearToSemesters } from './utils';
 
 export const GRADE_VALUES: Record<string, number> = { A: 5, B: 4, C: 2, D: 1 };
 
@@ -79,6 +79,40 @@ export function gradeNeedsRetake(grade: Grade | null | undefined, inferredBlankA
 
 export function gradeHadResit(grade: Grade | null | undefined) {
   return Boolean(grade?.raw_mention?.includes('/'));
+}
+
+
+function extractToeicScores(raw: string | null | undefined): number[] {
+  if (!raw) return [];
+  const text = String(raw).trim().replace(/,/g, '.');
+  if (!text) return [];
+
+  const scores: number[] = [];
+  for (const attempt of text.split('#')) {
+    const clean = attempt.trim();
+    if (!clean) continue;
+
+    // Formats courants du fichier CESI : « 575 / 990 », « 230 # 495 » ou « 625 ».
+    const outOf990 = clean.match(/(\d+(?:\.\d+)?)\s*\/\s*990\b/i);
+    if (outOf990) {
+      const value = Number(outOf990[1]);
+      if (Number.isFinite(value) && value >= 0 && value <= 990) scores.push(value);
+      continue;
+    }
+
+    const values = (clean.match(/\d+(?:\.\d+)?/g) || [])
+      .map(Number)
+      .filter((value) => Number.isFinite(value) && value >= 0 && value <= 990);
+    if (values.length) scores.push(values[values.length - 1]);
+  }
+  return scores;
+}
+
+function isToeicEvaluation(evaluation: Evaluation) {
+  const name = normalizeText(evaluation.name);
+  return name.includes('anglais')
+    && name.includes('preparation a la certification')
+    && name.includes('global exam');
 }
 
 export function gradeTooltip(grade: Grade | null | undefined): string {
@@ -249,6 +283,10 @@ export function defaultPreconisations(
     if (computed.resitCount === 0) ids.add(1);
     else ids.add(2);
   }
+  if (computed.toeicScore !== null && computed.toeicScore < 785) {
+    ids.add(25);
+    if (computed.toeicProgressed) ids.add(26);
+  }
   return [...ids];
 }
 
@@ -309,6 +347,18 @@ export function computeJury(
     const grade = gradeMap.get(`${student.id}:${e.id}`);
     return sum + (gradeHadResit(grade) ? 1 : 0);
   }, 0);
+  const resitValidatedCount = yearEvals.reduce((sum, e) => {
+    const grade = gradeMap.get(`${student.id}:${e.id}`);
+    return sum + (gradeHadResit(grade) && (grade?.final_mention === 'A' || grade?.final_mention === 'B') ? 1 : 0);
+  }, 0);
+
+  const toeicScores = yearEvals
+    .filter(isToeicEvaluation)
+    .sort((a, b) => a.semester - b.semester || a.name.localeCompare(b.name))
+    .flatMap((evaluation) => extractToeicScores(gradeMap.get(`${student.id}:${evaluation.id}`)?.numeric_note_text));
+  const toeicScore = toeicScores.length ? toeicScores[toeicScores.length - 1] : null;
+  const toeicPreviousScore = toeicScores.length > 1 ? toeicScores[toeicScores.length - 2] : null;
+  const toeicProgressed = toeicScore !== null && toeicPreviousScore !== null && toeicScore > toeicPreviousScore;
 
   const currentYearNumber = Number(yearLabel.replace(/\D/g, '')) || 0;
   const studentDebts = debts.filter((d) => d.student_id === student.id);
@@ -330,23 +380,34 @@ export function computeJury(
   if (record && !record.previous_recommendations_respected) reasons.push('Préconisations précédentes non respectées');
 
   let automaticOpinion: Exclude<JuryOpinion, 'indetermine'> | null = null;
+  let automaticOpinionReason = 'Avis indéterminé : les résultats disponibles ne permettent pas encore de statuer automatiquement.';
   const hasReferenceData = relevantUes.length > 0;
-  if (hasReferenceData) {
+  if (!hasReferenceData) {
+    automaticOpinionReason = 'Avis indéterminé : aucune UE du référentiel n’est disponible pour cette année.';
+  } else {
     const bothSemestersValidated = semesters.every((s) => semesterValidated[s] === true);
-    if (
-      pendingPreviousDebts > 0 ||
-      record?.major_behavior_issue ||
-      (record && !record.previous_recommendations_respected)
-    ) {
+    const blockingReasons: string[] = [];
+    if (pendingPreviousDebts > 0) blockingReasons.push(`${pendingPreviousDebts} dette(s) d’une année précédente encore non validée(s)`);
+    if (record?.major_behavior_issue) blockingReasons.push('un écart de comportement majeur est signalé');
+    if (record && !record.previous_recommendations_respected) blockingReasons.push('les préconisations du jury précédent ne sont pas respectées');
+
+    if (blockingReasons.length) {
       automaticOpinion = 'defavorable';
+      automaticOpinionReason = `Avis défavorable : ${blockingReasons.join(' ; ')}.`;
     } else if (yearComplete && ectsAcquired < 18) {
       automaticOpinion = 'defavorable';
+      automaticOpinionReason = `Avis défavorable : l’année est complète mais seulement ${ectsAcquired} ECTS sont acquis, soit moins de 18 ECTS.`;
     } else if (bothSemestersValidated) {
       automaticOpinion = 'favorable';
+      automaticOpinionReason = `Avis favorable : les semestres S${semesters[0]} et S${semesters[1]} sont complets et validés.`;
     } else if (academicUeNotValidated > 3) {
       automaticOpinion = 'defavorable';
+      automaticOpinionReason = `Avis défavorable : ${academicUeNotValidated} UE académiques finalisées ne sont pas validées, soit plus de 3.`;
     } else if (academicUeNotValidated > 0 || totalUeNotValidated > 0) {
       automaticOpinion = 'reserve';
+      automaticOpinionReason = `Avis réservé : ${totalUeNotValidated} UE finalisée(s) ne sont pas validée(s), dont ${academicUeNotValidated} UE académique(s).`;
+    } else if (!yearComplete) {
+      automaticOpinionReason = 'Avis indéterminé : aucune UE finalisée n’est en échec, mais l’année n’est pas encore suffisamment complète pour valider automatiquement les deux semestres.';
     }
   }
 
@@ -367,6 +428,11 @@ export function computeJury(
     unjustifiedAbsences,
     missingGrades,
     resitCount,
+    resitValidatedCount,
+    toeicScore,
+    toeicPreviousScore,
+    toeicProgressed,
+    automaticOpinionReason,
     reasons,
   };
 }
